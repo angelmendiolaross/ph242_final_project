@@ -8,4 +8,6 @@
 
 5) We'll probably want to go through our the wrappers/library of candidate estimators! Feel free to let me know if these look wild or we should add/cut! 
 
+6) The percentage of the population identifying as White, Non-Hispanic/Latinx is really strongly correlated with the percentage of the population identifying as Black (-0.83). Depressing but unsurprising - we might want to just pick one or the other? We can talk about that more when we chat Monday! (Will do modeling two ways).
+
 Thanks, team! 
