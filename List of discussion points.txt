@@ -1,0 +1,11 @@
+1) Making our DAG a little simpler and just using "W" instead of all of the individual W's. 
+
+2) Our treatment variable has three levels of state enforcement, not county enforcement right? In some parts of our RMD, we describe this differently, so we'll need to make sure we're really clear here. 
+
+3) Responding to the do we need MSM here comment/checking in with Jean & Shalika in OH - totally agreed; we might just be able to run a saturated model since it's only three levels, but it'll be good to check with them about it (I'll see if I can't get to both this weekend).
+
+4) Is there a reason we weren't using population and/or population density in our SCM? I used them in the analysis (can just take them out and re-run if needed!) Let me know if I'm missing something though! 
+
+5) We'll probably want to go through our the wrappers/library of candidate estimators! Feel free to let me know if these look wild or we should add/cut! 
+
+Thanks, team! 
