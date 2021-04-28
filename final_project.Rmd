@@ -1,6 +1,8 @@
 ---
 title: "Introduction to Causal Inference - Final Project"
-output: pdf_document
+output:
+  html_document:
+    df_print: paged
 ---
 
 ```{r setup, include=FALSE}
@@ -192,6 +194,7 @@ df %<>%
   mutate(treatment = ifelse(countyFIPS %in% tn_nomask, 0, treatment))
 
 ```
+
 Kansas is a unique case with mask mandate data available by county. On July 2, 2020, the governor of Kansas issued a state mandate, effective July 3, requiring masks or other face coverings in public spaces. As of August 11, 24 of Kansas’s 105 counties did not opt out of the state mandate. 81 counties opted out of the state mandate, as permitted by state law, and did not adopt their own mask mandate. These 81 counties are regarded as untreated in our dataset. Source: <https://www.cdc.gov/mmwr/volumes/69/wr/mm6947e2.htm>
 
 Four Tennessee counties that have never had a mask mandate: Cheatham, Dickson, Lewis and Hickman. These are regarded as untreated in the dataset. Source: <https://fox17.com/news/local/here-are-the-tennessee-counties-where-masks-are-mandated-right-now-thanksgiving-covid-19-travel-nashville-williamson-davidson-wilson-rutherford-sumner-montgomery-henry-robertson-wayne-warren>
@@ -233,28 +236,47 @@ df %<>%
   mutate(treat_date=ifelse(state=="SD",0,treat_date))
 ```
 
+```{r}
+## Checking correlations between individual variables within our W to make sure that there's not gonna be any multi-collinearity issues!  ##
+library(corrplot)
+
+just_ws=covid_df %>% ##Using covid_df because everything we need is here and not inflating size of sample by time unnecessarily - doesn't change correlation, but changes significance, if we want to look at that## 
+  select(pct_unemployed, median_hh_income, population, population_density, african_american, hispanic, asian_american, white, native_alaskan, hawaiian_pacific, pct_college_associate)
+
+cor_justws=cor(just_ws)
+View(cor_justws)
+
+corrplot(cor_justws, type="upper", order="hclust", sig.level = 0.01, insig = "blank")
+```
+
+Okay, so we seem to have a multi-collinearity issue here: the percentage of the population identifying as White, Non-Hispanic/Latinx is highly negatively correlated with the percentage of the population identifying as Black. 
+
 ## Specify the Scientific Question
 What is the effect of state mandates to wear a mask on Covid-19 infection rates in US counties during 2020? 
 
 This is a causal question - and not a statistical question - because we are not just interested in the observed association between mask enforcement by states and Covid-19 infection rate. We want to know what infection rates would have been if mask enforcement by states would have been generated differently, for example, by mandating all adults to wear a mask, or mandating no adults to wear a mask. The target population are US counties from January to December 2020. 
 
-## Specify a Casual Model
+## Specify a Causal Model
 
 **Endogenous variables:** 
 Endogenous variables are factors that inform the scientific question we're asking, and of which we have a certain level of knowledge. Here, we're including all observable factors that are present in our data, but we could potentially include some unobservables as well, which we will address later. 
-$Y$ = Infection rates at the county-level (for each month from Jan to Dec 2020)
+$infection_rate$ = Infection rates at the county-level (for each month from Jan to Dec 2020)
 $A$ = The exposure (state-wide mask mandate) has three possible levels: 
-$\mathcal{A} = {0, 1, 2}$
-These levels correspond to mask enforcement at the state-level (0 = No, 1 = Some parts, 2 = Yes).
+$\mathcal{A} = \{0, 1, 2\}$. 
+These levels correspond to mask enforcement at the state-level (0 = No state-level mask enforcement, 1 = Mask enforcement only in some parts of the state, 2 = Yes, full, state-level mask enforcement).
 
 $W$ represents the following covariates:
-$W_1$ = Median income at the county level
-$W_2$ = % of Whites at the county level
-$W_3$ = % of Hispanic at the county level
-$W_4$ = % of African Americans at the county level
-$W_5$ = % of Asian Americans at the county level
-$W_6$ = % of residents who finished college or associate education at the county level
-$W_7$ = % unemployed (by month) at the county level
+\begin{itemize}
+  \item Median income at the county level
+  \item % of Whites at the county level
+  \item % of Hispanic at the county level
+  \item % of African Americans at the county level
+  \item % of Asian Americans at the county level
+  \item % of residents who finished college or associate education at the county level
+  \item % unemployed (by month) at the county level
+  \item population of the county
+  \item population density of the county
+\end{itemize}
 
 Given our outcome of interest, treatment and potential confounders, we cannot make any independence assumptions or exclusion restrictions. The economic structure or policies developed at the county level can all be shared common causes of median income, race, educational attainment and employment. 
 
@@ -271,38 +293,29 @@ $U_{W6}$ refers to the unmeasured confounders related to the percentage of resid
 
 $U_{W7}$ refers to the unmeasured confounders related to the unemployment rate at the county level. These could be: economic structure, minimum wage, quality of unemployment services. 
 
+$U_{W8}$ and $U_{W9}$ refer to the unmeasured confounders related to the population and population density at the county level, respectively. These could be: political preference and/or partisanship of the county, presence of undocumented individuals. 
+
 $U_A$ refers to the unmeasured confounders related to mask enforcement by the state. These could be: political pressure from different constituencies to either pass or abstain from passing a mask mandate.
 
 $U_Y$ refers to the unmeasured confounders related to mask enforcement by the state. These could be: genetic factors, medications, health care access, and travel behavior.
 
 **Structural Causal Model**
-$W_1 = f_{W1}(U_{W1})$
-$W_2 = f_{W2}(W_1,U_{W2})$
-$W_Ω = f_{W3}(W_1,W_2,U_{W3})$
-$W_4 = f_{W4}(W_1,W_2,U_{W3}, U_{W4})$
-$W_5 = f_{W5}(W_1,W_2,U_{W3}, U_{W4}, U_{W5})$
-$W_6 = f_{W6}(W_1,W_2,U_{W3}, U_{W4}, U_{W5}, U_{W6})$
-$W_7 = f_{W6}(W_1,W_2,U_{W3}, U_{W4}, U_{W5}, U_{W6}, U_{W7})$
-$A = f_A(W_1,W_2,W_3,W_4,W_5,W_6,W_7,U_A)$
-$Y = f_Y(W_1,W_2,W_3,W_4,W_5,W_6,W_7,A,U_Y)$
+$W = f_{W}(U_{W})$
+$A = f_A(W, U_A)$
+$infection_rate = f_Y(W,A,U_Y)$
 **Comment BS: Usually there's a time ordering to think about the W's. I don't know how much that exactly applies here, but does it make sense to have race, then median income, then unemployment?**  
+
 ```{r}
 suppressPackageStartupMessages(library(tidyverse))
 library(ggdag)
 
 coords <- list(
-    x = c(A = 0, W1 = 1, W2 = 5, W3 = 9, W4 = 13, W5 = 17, W6 = 21, U = 10, Y = 23),
-    y = c(A = 2, W1 = 10, W2 = 10, W3 = 10, W4 = 10, W5 = 10, W6 = 10, U = -5, Y = 2))
+    x = c(A = 0, W = 1, U = 10, Y = 23),
+    y = c(A = 2, W = 10, U = -5, Y = 2))
     
-dagify(Y ~ W1 + W2 + W3 + W4 + W5 + W6 + W7 + A + U,  
-       A ~ W1 + W2 + W3 + W4 + W5 + W6 + W7 + U, 
-       W1 ~ U, 
-       W2 ~ W1 + U, 
-       W3 ~ W1 + W2 + U, 
-       W4 ~ W1 + W2 + W3 + U, 
-       W5 ~ W1 + W2 + W3 + W4 + U,
-       W6 ~ W1 + W2 + W3 + W4 + W5 + U,
-       W7 ~ W1 + W2 + W3 + W4 + W5 + W6 + U,
+dagify(Y ~ W + A + U,  
+       A ~ W + U, 
+       W ~ U, 
        coords=coords) %>% 
        ggdag() + 
        theme_dag()
@@ -310,16 +323,27 @@ dagify(Y ~ W1 + W2 + W3 + W4 + W5 + W6 + W7 + A + U,
 
 **Comment BS: This is the DAG with no exclusion restrictions or independence assumptions. Does it make sense? We can make it outside of R, but I don't know how to make it better with this code. If anybody knows how to, it'd be great if the arrows coming from U were dashed. Also, I see a case for reverse causality here. We can draw it and then assume it away in the d-separation convenience assumptions, or we can say that for the purpose of this study we don't consider it a possibility from the get go.** 
 
+
+```{r}
+## Checking to make sure that the treatment variable (A) is county- or state-specific (seems to be state specific, so we'll be sure to implement clustering like Maya, Jean, and Shalika talked about) ##
+
+## This will also be a limitation. ##
+covid_df %>%
+  select(county_name, state, mask_requirement) %>%
+  filter(state=="FL") 
+
+```
+
 ## Translate your question into a formal target casual parameter defined using counterfactuals
 The intervention of interest is forcing each individual to have a range of mask enforcement $a \in \mathcal{A}$. We are interested in exploring three levels in our intervention of interest: 
-0 = No mask enforcement at the county level, 
-1= Mask enforcement in some parts of the county, 
-2 = Mask enforcement in the whole county.
+0 = No mask enforcement at the state level, 
+1= Mask enforcement in some parts of the state, 
+2 = Mask enforcement in the whole state.
 
-The counterfactuals of interest are ($Y_a:a \in \mathcal{A}$), where A are the set of mask enforcement levels of interest. The counterfactual $Y_a$ is the infection rate if, possibly contrary to fact, the individual lived in a state with mask enforcement A=a from the January to December 2020 period.
+The counterfactuals of interest are ($infection_rate_a:a \in \mathcal{A}$), where A are the set of mask enforcement levels of interest. The counterfactual $infection_rate_a$ is the infection rate if, possibly contrary to fact, the individual lived in a state with mask enforcement A=a from the January to December 2020 period.
 
 Counterfactuals of interest: 
-$Y_a = {f}_Y (W_1, W_2, W_3, W_4, W_5, W_6, W_7, a, U_Y) (a \in \mathcal{A})$ = {0, 1, 2}
+$infection_rate_a = {f}_Y (W_1, W_2, W_3, W_4, W_5, W_6, W_7, a, U_Y) (a \in \mathcal{A})$ = {0, 1, 2}
 where $\mathcal{A}$ refers to treatment levels of interest
 
 A marginal structural model provides a summary measure of how the expectation of the counterfactual outcome changes as a function of treatment. Given that our treatment has three potential levels of exposure, we think a marginal structural model is the most suitable way to represent this relationship. 
@@ -328,6 +352,7 @@ $\mathbb{E}_{U,X}(Y_a)$ = $m(a|\beta)$
 $\beta(P_{U,X|m})\equiv arg min_\beta \mathbb{E}_{U,X} [\sum_{a \in \mathcal{A}}(Y_a = m(a|\beta)^2)]$
 
 **In the lecture notes it says that for MSM intervention variable is continuous or ordinal with a lot of levels. Maybe ask Shalika/Jean whether we're fine here using an MSM with only three levels?**
+
 
 ## Specify your observed data and its link to the casual model
 *Describe the data you are working with and its link to the casual model you have specified.*
@@ -339,6 +364,7 @@ The statistical model $\mathcal{M}$ is the set of possible observed data distrib
 *Be  sure  to  include  a  basic  descriptive  table  of  your  data  that  provides information on the outcome, exposure, and covariate distributions.*
 ```{r, echo=F, results='asis'}
 # reducing just to main variables
+library(stargazer)
 stats <- df[c(9:10,12:20,23)]
 stargazer(as.data.frame(stats),
           title = "Descriptive Statistics",
@@ -355,7 +381,7 @@ stargazer(as.data.frame(stats),
                                "Percent Pacific Islander", 
                                "Percent College", 
                                "Unemployment Rate"))
-`````
+```
 
 ## Identify
 **Is your target casual parameter identified under your initial causal model?**
@@ -374,11 +400,24 @@ We use $\mathcal{M}\mathcal{F}*$ to denote the original SCM, augmented with addi
 
 **How plausible  are  these  for  your  particular  problem?**
 **Comment BS: Any thoughts?**
-We think these assumptions are too strong and might not hold in a real-life scenario. 
+We think these assumptions are too strong and might not hold in a real-life scenario. Based on empirical literature, we know that COVID-19 spread is related to the following (Roy & Ghosh, 2020}):
+
+\begin{itemize}
+  \item Population density **Including this in the analysis, but we can take it out if I'm missing something/the reason we weren't including it.** 
+  \item The amount of testing 
+  \item Airport traffic
+  \item Proportion of the population in a higher age groups (40 and above, and most especially 60+).
+\end{itemize}
+
+
+(Hyperlink latex thing was acting feisty, so just pasting the link here: https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0241165#:~:text=Population%20density%2C%20testing%20numbers%20and,population%20density%20and%20airport%20traffic.)
+
+***Specifically, we do not have data on the latter three*** and the amount of testing as well as the proportion of the population in a higher age group are likely to be contributing factors not only to infection rates, but also whether a state enforces mask-wearing. These data are certainly available from other sources, but we did not have time to acquire and merge the various data sources needed to accomplish this; however, this would certainly help us be more confident in making our necessary assumptions for model identification. 
 
 **Are there additional data/changes to your study design that would improve their plausibility?**
 **Comment BS: Let's consider other potentially measured variables we're not including in W because we don't have them in the dataset that might be relevant confounders. How important are these for the model we're proposing?**
 **Comment BS: Any thoughts?** 
+Yes! As detailed above, there are certainly additional data sources (e.g., CPS, as well as other COVID-related data sets) that we could incorporate to improve the plausibility of our assumptions! The impact of mask enforcement on COVID-19 infection rates does not fall under any of our research interests explicitly though, so we won't do this later :) 
 
 ## Commit to a Statistical Model and Estimand (Target parameter of the observed data distribution).
 The SCM, which is a model on $P_{U,X}$ implies a model $\mathcal{M}$ on $P_0$. This is our statistical model. A statistical model is a set of allowed distributions for the observed data. 
@@ -386,25 +425,582 @@ The SCM, which is a model on $P_{U,X}$ implies a model $\mathcal{M}$ on $P_0$. T
 In this case, given the data we have and the convenience assumptions made, we will be working with a semi-parametric model (?). **I'm not too sure about how to think about this**
 
 The target parameter of the observed data distribution (the __estimand__) given our convenience assumptions, would be the following: 
-$[\mathbb{E}(Y|A=1,{W_1,W_2,W_3,W_4,W_5,W_6,W_7}) - \mathbb{E}(Y|A=0,W_1,W_2,W_3,W_4,W_5,W_6,W_7)]$ **I realized I don't know how to write this for a MSM, but I'll update when I find this information on the class lectures**
+$[\mathbb{E}(Y|A=1,{W_1,W_2,W_3,W_4,W_5,W_6,W_7}) - \mathbb{E}(Y|A=0,W_1,W_2,W_3,W_4,W_5,W_6,W_7)]$**I realized I don't know how to write this for a MSM, but I'll update when I find this information on the class lectures**
+
+**I think it's the same? At least for us! If it's an MSM we're running, we're assuming the effect is linear - i.e., the difference between some mask and no mask is the same as the difference between all counties enforcing and only some enforcing).**
+
+**If we just collapse to W (use the below, delete the above):**
+$[\mathbb{E}(Y|A=1,W=w) - \mathbb{E}(Y|A=0,W=w)]$
 
 ## Estimate.
 **Apply each of the three estimators we have learned in class (simple or non-targeted substitution estimator-a.k.a G-computation estimator), Inverse probability of treatment weighted estimator, and TMLE) to estimate your target parameter. Use of the tmle, ltmle, or other Rpackages is acceptable. Also report unadjusted results for comparison.**
 
-## G-computation estimator
+```{r}
+# One last step to prepare for estimation. ##
+df=df%>%
+  mutate(A=as.numeric(as.factor(mask_requirement))-1, populationsq=population**2, population_densitysq=population_density**2, log_population=log(population), log_popdensity=log(population_density))
 
+df %>% 
+  count(A)
+```
+
+## G-computation estimator
 **Can we abbreviate this to W? Also, I don't know how to make the notation for the 7 W's in the marginal distribution?**
 $\mathbb{E}_{U,X} = \sum_{w} \mathbb{E}_0[\mathbb{E}(Y|A=a,W_1,W_2,W_3,W_4,W_5,W_6,W_7)P_0(W=w)$ 
 
-## Inverse probabiluty if treatment weighted estimator
+**For abbreviating to W**
+$\mathbb{E}_{U,X} = \sum_{w} \mathbb{E}_0[\mathbb{E}(Y|A=a,W=w)P_0(W=w)$ 
+
+
+```{r}
+# G-Comp with SuperLearner #
+# Commenting out for now because this is having problems, and I haven't been able to figure out what the problem is here. #
+library(SuperLearner)
+library(polspline)
+set.seed(52059)
+
+Fold=c(rep(1, 37272), rep(2, 37272), rep(3, 37272), rep(4, 37272), rep(5, 37272), rep(6, 37272), rep(7, 37272), rep(8, 37272), rep(9, 37272), rep(10, 37272))
+ObsData=data.frame(df, Fold)
+head(ObsData)
+
+#CV.risk=matrix(NA, nrow=10, ncol=4)
+
+# Discrete Super Learner for loop - each estimator on training set #
+#for (V in 1:10) {
+#  valid=ObsData[Fold==V,]
+#  train=ObsData[Fold!=V,]
+#  nrow(valid)
+#  EstA=glm(infection_rate~population+population_density+white+afri#an_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+A, data=ObsData, family='gaussian')
+#  EstB=glm(infection_rate~population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+A, data=ObsData, family='gaussian')
+#  EstC=glm(infection_rate~population+population_density+white+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(A), data=ObsData, family='gaussian')
+#  EstD=glm(infection_rate~population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(A), data=ObsData, family='gaussian')
+#  PredA=predict(EstA, newdata=valid, type='response')
+#  PredB=predict(EstB, newdata=valid, type='response')
+#  PredC=predict(EstC, newdata=valid, type='response')
+#  PredD=predict(EstD, newdata=valid, type='response')
+
+ # CV.risk[V,]=c(mean((valid$infection_rate-PredA)^2), mean((valid$infection_rate-PredB)^2), mean((valid$infection_rate-PredC)^2), mean((valid$infection_rate-PredD)^2)) 
+ 
+ # CV.risk[V,]=c(-mean(valid$infection_rate*log(PredA)+(1-valid$infection_rate)*(log(1-PredA))), -mean(valid$infection_rate*log(PredB)+(1-valid$infection_rate)*(log(1-PredB))), -mean(valid$infection_rate*log(PredA)+(1-valid$infection_rate)*(log(1-PredC))), -mean(valid$infection_rate*log(PredA)+(1-valid$infection_rate)*(log(1-PredD))))
+
+#}
+
+
+#colMeans(CV.risk)
+```
+
+```{r}
+#function (Y, X, newX, family, direction="both", trace=0, k=2)
+#{ 
+#  fit.glm=glm(infection_rate ~ ., data=ObsData, family='gaussian')
+#  fit.step=step(fit.glm, direction=direction, trace=trace,k=k)
+#  pred=predict(fit.step, newdata=newX, type="response")
+#  fit=list(object=fit.step)
+#  out=list(pred=pred, fit=fit)
+#  class(out$fit) =c("SL.step")
+#  return(out)
+#  }
+# Load wrapper #
+# F*** everything, I'm just going to pull this from my desktop, sorry! # 
+#source('C:/Users/jessi/Desktop/ph242_final_project/final_project_wr#appers_gcomp.R')
+
+# Library for algorithms #
+#SL.library=c('SL.glm.EstA', 'SL.glm.EstB', 'SL.glm.EstC', 'SL.glm.EstD', 'SL.ridge','SL.rpartPrune', 'SL.polymars', 'SL.mean')
+
+#X=subset(ObsData, select=-infection_rate)
+
+#SL.out=SuperLearner(Y=ObsData$infection_rate, X=X, #SL.library=SL.library, family='gaussian',cvControl=list(V=10))
+
+#SL.out
+  
+```
+ 
+```{r}
+# G-Computation (No SuperLearner) - not required for this section, but ideally if we can get the above working, that would be better!
+
+## !!! NOTE: JUST STARTING WITH FOUR BECAUSE THIS GETS OUT OF HAND FAST - SEE final_project_wrappers.R script for "full" list (actually not full, if we were going to fully compare the clustering on state versus clustering on state and county, this would require A-H compared to I-P). ## 
+
+# Create a dataset where the value of A is set to zero. #
+Alevel_0=ObsData
+Alevel_0$A=0
+
+# Create a dataset where the value of A is set to one. #
+Alevel_1=ObsData
+Alevel_1$A=1
+
+# Create a dataset where the value of A is set to two. #
+Alevel_2=ObsData
+Alevel_2$A=2
+
+# Estimator 1 - White included model - MSM #
+estimator_1=glm(infection_rate~population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+A, data=ObsData)
+
+## Commenting out clusters ## 
+#library(estimatr) estimator_1=lm_robust(infection_rate~population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+A, data=ObsData, cluster=state) #
+
+# Note: We won't actually use all three of these later (because this is the MSM) but I'm including it here to make sure it's clear that this is the case of a three-level/ordinal treatment. #
+qn1_2=predict(estimator_1, Alevel_2, type="response")
+qn1_1=predict(estimator_1, Alevel_1, type="response")
+qn1_0=predict(estimator_1, Alevel_0, type="response")
+
+# Estimator 2 - African_American included model - MSM #
+estimator_2=glm(infection_rate~population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+A, data=ObsData)
+# estimator_2=lm_robust(infection_rate~population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+A, data=ObsData, cluster=state) #
+
+qn2_2=predict(estimator_2, Alevel_2, type="response")
+qn2_1=predict(estimator_2, Alevel_1, type="response")
+qn2_0=predict(estimator_2, Alevel_0, type="response")
+
+
+# Estimator 3 - White Inlcuded - MSM - Population/Pop Density Sq #
+estimator_3=glm(infection_rate~population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+populationsq+population_densitysq+A, data=ObsData)
+#estimator_3=lm_robust(infection_rate~population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+populationsq+population_densitysq+A, data=ObsData, cluster=state)#
+
+qn3_2=predict(estimator_3, Alevel_2, type="response")
+qn3_1=predict(estimator_3, Alevel_1, type="response")
+qn3_0=predict(estimator_3, Alevel_0, type="response")
+
+# Estimator 4 - African_American Inlcuded - MSM - Population/Pop Density Sq #
+estimator_4=glm(infection_rate~population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+populationsq+population_densitysq+A, data=ObsData)
+#estimator_4=glm(infection_rate~population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+populationsq+population_densitysq+A, data=ObsData, cluster=state)
+
+qn4_2=predict(estimator_4, Alevel_2, type="response")
+qn4_1=predict(estimator_4, Alevel_1, type="response")
+qn4_0=predict(estimator_4, Alevel_0, type="response")
+
+# Estimator 5 - White Inlcuded - MSM - Population/Pop Density Log #
+estimator_5=glm(infection_rate~population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+log_population+log_popdensity+A, data=ObsData)
+#estimator_5=lm_robust(infection_rate~population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+log_population+log_popdensity+A, data=ObsData, cluster=state)#
+
+qn5_2=predict(estimator_5, Alevel_2, type="response")
+qn5_1=predict(estimator_5, Alevel_1, type="response")
+qn5_0=predict(estimator_5, Alevel_0, type="response")
+
+# Estimator 6 - African_American Inlcuded - MSM - Population/Pop Density Log #
+estimator_6=glm(infection_rate~population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+log_population+log_popdensity+A, data=ObsData)
+#estimator_6=glm(infection_rate~population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+as.factor(month)+log_population+log_popdensity+A, data=ObsData, cluster=state)
+
+qn6_2=predict(estimator_6, Alevel_2, type="response")
+qn6_1=predict(estimator_6, Alevel_1, type="response")
+qn6_0=predict(estimator_6, Alevel_0, type="response")
+
+# Note - the mean difference between 2 and 1 will be the same as the difference between 1 and 0 for the MSM! Therefore, I only use 1-0 here - this will have to change for the saturated models - see in later estimators. # 
+psi.hat1=mean(qn1_1)-mean(qn1_0)
+psi.hat2=mean(qn2_1)-mean(qn2_0)
+psi.hat3=mean(qn3_1)-mean(qn3_0)
+psi.hat4=mean(qn4_1)-mean(qn4_0)
+psi.hat5=mean(qn5_1)-mean(qn5_0)
+psi.hat6=mean(qn6_1)-mean(qn6_0)
+
+```
+
+```{r}
+estimates=as.data.frame(cbind(psi.hat1, psi.hat2, psi.hat3, psi.hat4, psi.hat5, psi.hat6))
+estimates
+```
+
+```{r}
+## Come back and add the simulation to get bias, variance, etc. ##
+#Mean_PsiHat1=mean(estimates[,1])
+#Mean_PsiHat2=mean(estimates[,2])
+#Mean_PsiHat3=mean(estimates[,3])
+#Mean_PsiHat4=mean(estimates[,4])
+
+#Mean_PsiHat1; Mean_PsiHat2; Mean_PsiHat3; Mean_PsiHat4
+
+```
+
+## Estimate the bias of each estimator. ##
+```{r}
+#Bias_PsiHat1=Mean_PsiHat1-Psi.P0
+#Bias_PsiHat2=Mean_PsiHat2-Psi.P0
+#Bias_PsiHat3=Mean_PsiHat3-Psi.P0
+#Bias_PsiHat4=Mean_PsiHat4-Psi.P0
+
+#Bias_PsiHat1; Bias_PsiHat2; Bias_PsiHat3; Bias_PsiHat4
+```
+
+## Estimate the variance of each estimator. ## 
+```{r}
+#forvar=as.data.frame(estimates)
+#head(forvar)
+
+#Var_PsiHat1=mean((forvar$V1-Mean_PsiHat1)^2)
+#Var_PsiHat2=mean((forvar$V2-Mean_PsiHat2)^2)
+#Var_PsiHat3=mean((forvar$V3-Mean_PsiHat3)^2)
+#Var_PsiHat4=mean((forvar$V4-Mean_PsiHat4)^2)
+
+#Var_PsiHat1; Var_PsiHat2; Var_PsiHat3; Var_PsiHat4
+
+```
+
+## Estimate the mean squared error or each estimator. ##
+```{r}
+#MSE_PsiHat1=Bias_PsiHat1^2 + Var_PsiHat1
+#MSE_PsiHat2=Bias_PsiHat2^2 + Var_PsiHat2
+#MSE_PsiHat3=Bias_PsiHat3^2 + Var_PsiHat3
+#MSE_PsiHat4=Bias_PsiHat4^2 + Var_PsiHat4
+
+#MSE_PsiHat1; MSE_PsiHat2; MSE_PsiHat3; MSE_PsiHat4
+```
+
+## Inverse probability of treatment weighted estimator
+
+```{r}
+library(nnet)
+
+# Estimator T1  - White Included#
+iptw_treatreg1=multinom(A ~ population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate, data=ObsData)
+# iptw_treatreg=multinom(A ~ population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate, data=ObsData, cluster=state)#
+
+treat_pred1=predict(iptw_treatreg1, type="probs")
+
+gAW1=matrix(NA, nrow=37272, ncol=3)
+
+gAW1[ObsData$A==0] = treat_pred1[ObsData$A==0, "0"]
+gAW1[ObsData$A==1] = treat_pred1[ObsData$A==1, "1"]
+gAW1[ObsData$A==2] = treat_pred1[ObsData$A==2, "2"]
+
+summary(gAW1)
+
+# Estimator T2  - African_American Included#
+iptw_treatreg2=multinom(A ~ population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate, data=ObsData)
+# iptw_treatreg=multinom(A ~ population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate, data=ObsData, cluster=state)#
+
+treat_pred2=predict(iptw_treatreg2, type="probs")
+
+gAW2=matrix(NA, nrow=37272, ncol=3)
+
+gAW2[ObsData$A==0] = treat_pred2[ObsData$A==0, "0"]
+gAW2[ObsData$A==1] = treat_pred2[ObsData$A==1, "1"]
+gAW2[ObsData$A==2] = treat_pred2[ObsData$A==2, "2"]
+
+summary(gAW2)
+
+# Estimator T3  - White Included - Pop/Pop Density sq#
+iptw_treatreg3=multinom(A ~ population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq, data=ObsData)
+# iptw_treatreg=multinom(A ~ population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq, data=ObsData, cluster=state)#
+
+treat_pred3=predict(iptw_treatreg3, type="probs")
+
+gAW3=matrix(NA, nrow=37272, ncol=3)
+
+gAW3[ObsData$A==0] = treat_pred3[ObsData$A==0, "0"]
+gAW3[ObsData$A==1] = treat_pred3[ObsData$A==1, "1"]
+gAW3[ObsData$A==2] = treat_pred3[ObsData$A==2, "2"]
+
+summary(gAW3)
+
+# Estimator T4  - African_American Included - pop/pop density sq#
+iptw_treatreg4=multinom(A ~ population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq, data=ObsData)
+# iptw_treatreg=multinom(A ~ population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq, data=ObsData, cluster=state)#
+
+treat_pred4=predict(iptw_treatreg4, type="probs")
+
+gAW4=matrix(NA, nrow=37272, ncol=3)
+
+gAW4[ObsData$A==0] = treat_pred4[ObsData$A==0, "0"]
+gAW4[ObsData$A==1] = treat_pred4[ObsData$A==1, "1"]
+gAW4[ObsData$A==2] = treat_pred4[ObsData$A==2, "2"]
+
+summary(gAW4)
+
+# Estimator T3  - White Included - Pop/Pop Density log#
+iptw_treatreg5=multinom(A ~ population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+log_population+log_popdensity, data=ObsData)
+# iptw_treatreg=multinom(A ~ population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+log_population+log_popdensity, data=ObsData, cluster=state)#
+
+treat_pred5=predict(iptw_treatreg5, type="probs")
+
+gAW5=matrix(NA, nrow=37272, ncol=3)
+
+gAW5[ObsData$A==0] = treat_pred5[ObsData$A==0, "0"]
+gAW5[ObsData$A==1] = treat_pred5[ObsData$A==1, "1"]
+gAW5[ObsData$A==2] = treat_pred5[ObsData$A==2, "2"]
+
+summary(gAW5)
+
+# Estimator T6  - African_American Included - pop/pop density log#
+iptw_treatreg6=multinom(A ~ population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+log_population+log_popdensity, data=ObsData)
+# iptw_treatreg=multinom(A ~ population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+log_population+log_popdensity, data=ObsData, cluster=state)#
+
+treat_pred6=predict(iptw_treatreg6, type="probs")
+
+gAW6=matrix(NA, nrow=37272, ncol=3)
+
+gAW6[ObsData$A==0] = treat_pred6[ObsData$A==0, "0"]
+gAW6[ObsData$A==1] = treat_pred6[ObsData$A==1, "1"]
+gAW6[ObsData$A==2] = treat_pred6[ObsData$A==2, "2"]
+
+summary(gAW6)
+```
+
+Ranges from zero (ish) to one, so that's good! Seems skewed towards higher values a bit though, too. 
+
+```{r}
+wt1=1/gAW1
+wt2=1/gAW2
+wt3=1/gAW3
+wt4=1/gAW4
+wt5=1/gAW5
+wt6=1/gAW6
+
+summary(wt1)
+summary(wt2)
+summary(wt3)
+summary(wt4)
+summary(wt5)
+summary(wt6)
+
+```
+
+Wow! Some extremely large weights here for the max - 259,229.70! Mostly reasonable though. 
+
+```{r}
+IPTW1=mean(wt1*as.numeric(ObsData$A==2)*ObsData$infection_rate)-mean(wt1*as.numeric(ObsData$A==0)*ObsData$infection_rate)
+
+HT1=(mean(wt1*as.numeric(ObsData$A==2)*ObsData$infection_rate)/mean(wt1*as.numeric(ObsData$A==2)))-(mean(wt1*as.numeric(ObsData$A==0)*ObsData$infection_rate)/mean(wt1*as.numeric(ObsData$A==0)))
+
+IPTW2=mean(wt2*as.numeric(ObsData$A==2)*ObsData$infection_rate)-mean(wt2*as.numeric(ObsData$A==0)*ObsData$infection_rate)
+
+HT2=(mean(wt2*as.numeric(ObsData$A==2)*ObsData$infection_rate)/mean(wt2*as.numeric(ObsData$A==2)))-(mean(wt2*as.numeric(ObsData$A==0)*ObsData$infection_rate)/mean(wt2*as.numeric(ObsData$A==0)))
+
+IPTW3=mean(wt3*as.numeric(ObsData$A==2)*ObsData$infection_rate)-mean(wt3*as.numeric(ObsData$A==0)*ObsData$infection_rate)
+
+HT3=(mean(wt3*as.numeric(ObsData$A==2)*ObsData$infection_rate)/mean(wt3*as.numeric(ObsData$A==2)))-(mean(wt3*as.numeric(ObsData$A==0)*ObsData$infection_rate)/mean(wt3*as.numeric(ObsData$A==0)))
+
+IPTW4=mean(wt4*as.numeric(ObsData$A==2)*ObsData$infection_rate)-mean(wt4*as.numeric(ObsData$A==0)*ObsData$infection_rate)
+
+HT4=(mean(wt4*as.numeric(ObsData$A==2)*ObsData$infection_rate)/mean(wt4*as.numeric(ObsData$A==2)))-(mean(wt4*as.numeric(ObsData$A==0)*ObsData$infection_rate)/mean(wt4*as.numeric(ObsData$A==0)))
+
+IPTW5=mean(wt5*as.numeric(ObsData$A==2)*ObsData$infection_rate)-mean(wt5*as.numeric(ObsData$A==0)*ObsData$infection_rate)
+
+HT5=(mean(wt5*as.numeric(ObsData$A==2)*ObsData$infection_rate)/mean(wt5*as.numeric(ObsData$A==2)))-(mean(wt5*as.numeric(ObsData$A==0)*ObsData$infection_rate)/mean(wt5*as.numeric(ObsData$A==0)))
+
+IPTW6=mean(wt6*as.numeric(ObsData$A==2)*ObsData$infection_rate)-mean(wt6*as.numeric(ObsData$A==0)*ObsData$infection_rate)
+
+HT6=(mean(wt6*as.numeric(ObsData$A==2)*ObsData$infection_rate)/mean(wt6*as.numeric(ObsData$A==2)))-(mean(wt6*as.numeric(ObsData$A==0)*ObsData$infection_rate)/mean(wt6*as.numeric(ObsData$A==0)))
+
+comp=as.data.frame(cbind(c("Est1","Est2", "Est3", "Est4","Est5", "Est6"), rbind(cbind(IPTW1, HT1), cbind(IPTW2, HT2), cbind(IPTW3, HT3), cbind(IPTW4, HT4), cbind(IPTW5, HT5), cbind(IPTW6, HT6))))
+
+comp=comp%>%
+  rename(
+    IPTW = IPTW1,
+    HT = HT1,
+    Estimator = V1
+    )
+
+comp
+
+```
+
+HT is \textit{much} better than IPTW. These IPTW estimates are wild :) 
+
+```{r}
+
+## IPTW stabilized 1 ##
+gA1=matrix(NA, nrow=37270)
+
+gA1[ObsData$A==0]=mean(ObsData$A==0)
+gA1[ObsData$A==1]=mean(ObsData$A==1)
+gA1[ObsData$A==2]=mean(ObsData$A==2)
+
+wt.MSM1=gA1/gAW1
+
+st.MSM1=glm(infection_rate ~ A, data=ObsData, weights=wt.MSM1)
+#st.MSM1=lm_robust(infection_rate ~ A, data=ObsData, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM1)
+
+## IPTW stabilized 2 ##
+gA2=matrix(NA, nrow=37270)
+
+gA2[ObsData$A==0]=mean(ObsData$A==0)
+gA2[ObsData$A==2]=mean(ObsData$A==2)
+gA2[ObsData$A==2]=mean(ObsData$A==2)
+
+wt.MSM2=gA2/gAW2
+
+st.MSM2=glm(infection_rate ~ A, data=ObsData, weights=wt.MSM2)
+#st.MSM2=lm_robust(infection_rate ~ A, data=ObsData, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM2)
+
+## IPTW stabilized 3 ##
+gA3=matrix(NA, nrow=37270)
+
+gA3[ObsData$A==0]=mean(ObsData$A==0)
+gA3[ObsData$A==3]=mean(ObsData$A==3)
+gA3[ObsData$A==2]=mean(ObsData$A==2)
+
+wt.MSM3=gA3/gAW3
+
+st.MSM3=glm(infection_rate ~ A, data=ObsData, weights=wt.MSM3)
+#st.MSM3=lm_robust(infection_rate ~ A, data=ObsData, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM3)
+
+## IPTW stabilized 4 ##
+gA4=matrix(NA, nrow=37270)
+
+gA4[ObsData$A==0]=mean(ObsData$A==0)
+gA4[ObsData$A==4]=mean(ObsData$A==4)
+gA4[ObsData$A==2]=mean(ObsData$A==2)
+
+wt.MSM4=gA4/gAW4
+
+st.MSM4=glm(infection_rate ~ A, data=ObsData, weights=wt.MSM4)
+#st.MSM4=lm_robust(infection_rate ~ A, data=ObsData, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM4)
+
+## IPTW stabilized 5 ##
+gA5=matrix(NA, nrow=37270)
+
+gA5[ObsData$A==0]=mean(ObsData$A==0)
+gA5[ObsData$A==5]=mean(ObsData$A==5)
+gA5[ObsData$A==2]=mean(ObsData$A==2)
+
+wt.MSM5=gA5/gAW5
+
+st.MSM5=glm(infection_rate ~ A, data=ObsData, weights=wt.MSM5)
+#st.MSM5=lm_robust(infection_rate ~ A, data=ObsData, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM5)
+
+## IPTW stabilized 6 ##
+gA6=matrix(NA, nrow=37270)
+
+gA6[ObsData$A==0]=mean(ObsData$A==0)
+gA6[ObsData$A==6]=mean(ObsData$A==6)
+gA6[ObsData$A==2]=mean(ObsData$A==2)
+
+wt.MSM6=gA6/gAW6
+
+st.MSM6=glm(infection_rate ~ A, data=ObsData, weights=wt.MSM6)
+#st.MSM6=lm_robust(infection_rate ~ A, data=ObsData, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM6)
+
+iptw_sw_matrix=matrix(NA, nrow=6, ncol=1)
+iptw_sw_matrix[1,]=st.MSM1$coefficients[2]
+iptw_sw_matrix[2,]=st.MSM2$coefficients[2]
+iptw_sw_matrix[3,]=st.MSM3$coefficients[2]
+iptw_sw_matrix[4,]=st.MSM4$coefficients[2]
+iptw_sw_matrix[5,]=st.MSM5$coefficients[2]
+iptw_sw_matrix[6,]=st.MSM6$coefficients[2]
+
+iptw_sw_matrix
+
+```
 
 ## TMLE 
 
-**Use Super Learner when implementing TMLE. For comparison, you may wish to use it when implementing your G-computation and IPTW estimators also. A simple library is fine (writing wrappers to include your own parametric regressions as candidates is great). Include an assessment of the performance (cross validated risk) of the algorithms in your library.It is helpful to include the simple mean as a benchmark.  Also report an estimate of the cross-validated risk of the SL and interpret.**
+**Use Super Learner when implementing TMLE. For comparison, you may wish to use it when implementing your G-computation and IPTW estimators also. A simple library is fine (writing wrappers to include your own parametric regressions as candidates is great). Include an assessment of the performance (cross validated risk) of the algorithms in your library. It is helpful to include the simple mean as a benchmark.Also report an estimate of the cross-validated risk of the SL and interpret.**
 
+```{r}
+# SuperLearner # 
+library(SuperLearner)
+listWrappers()
+SL.library=c("SL.glm", "SL.step", "SL.mean")
+
+# Create our X dataframe, which has exposure and covariates, as well as X2 with A=2, X1 with A=1, and X0 with A=0 # 
+training=ObsData %>%
+  mutate(rand=runif(372720)) %>%
+  filter(rand < .2) %>% 
+  select(A,infection_rate,population,population_density,white,african_american,asian_american,hispanic,median_hh_income,pct_unemployed,pct_college_associate,log_population,log_popdensity,populationsq,population_densitysq)
+
+X_train=training %>%
+  select(-infection_rate, )
+
+# Create X's for each level of A to use later! #
+X0t=X_train %>% 
+  mutate(A=0)
+
+X1t=X_train %>% 
+  mutate(A=1)
+
+X2t=X_train %>%
+  mutate(A=2)
+
+# Estimate $\Bar{Q}_0(A,W)$ by running SuperLearner. #
+QbarSL = SuperLearner(Y=training$infection_rate, X=X_train, SL.library=SL.library, family="gaussian")
+
+# Get initial estimates of the expected outcome given exposure and covariates. # 
+QbarAW=predict(QbarSL, newdata=ObsData)$pred
+
+# Obtain initial estimates of the expected outcome for all units under different levels of exposure of A. # 
+Qbarq2W=predict(QbarSL, newdata=X2)$pred
+Qbarq1W=predict(QbarSL, newdata=X1)$pred
+Qbarq0W=predict(QbarSL, newdata=X0)$pred
+
+# Estimate the simple sub estimator (plug-in!) Again, we'll just need to do this for one level since we're working with an MSM (assuming linear impact of exposure on outcome.) #
+Phi_SS_Phat=mean(Qbarq1W)-mean(Qbarq0W)
+Phi_SS_Phat
+```
+
+```{r}
+# Now, we need to estimate the exposure mechanism (conditional probability of exposure level, a, given baseline covariates). #
+gHatSL=SuperLearner(Y=training$A, X=subset(X_train, select=-c(A)), SL.library=SL.library, family="gaussian")
+
+#### !!!! NOTE !!!! The code we have from lab will need to be adapted here - I can't get this all to run, so I'm going to put in what I think will potentially work, assuming it'll be a few rows, with 2 and then 1? ####
+gHat2W=gHatSL$SL.predict[1] ### [1] is a guess! 
+gHat1W=gHatSL$SL.predict[2]
+gHat0W=1-gHat2W+gHat1W # This is fine so long as we can populate the above two correctly! #
+
+## Propensity score summary ##
+summary(data.frame(gHat2W, gHat1W, gHat0W))
+
+## Predicted probability of A given baseline ##
+gHatAW=rep(NA, 37270)
+gHatAW[training$A==2]=gHat2W[training$A==2]
+gHatAW[training$A==1]=gHat1W[training$A==1]
+gHatAW[training$A==0]=gHat0W[training$A==0]
+
+# Check that the predicted probability of the obs exposure equal the predicted probabiity when A=a # 
+tail(data.frame(training$A, gHatAW, gHat1W, gHat0W))
+
+# Clever covariate H(A,W) for each obs #
+H.AW = as.numeric(training$A==1)/gHat1W - as.numeric(training$A==0)/gHat0W 
+##!!!!! Not sure if this works perfectly either - do we need to adapt this from lab given our MSM?!!! ###
+
+# Evaluate our clever covariates # 
+H.2W=1/gHat2W
+H.1W=1/gHat1W
+H.0W=1/gHat0W
+
+tail(data.frame(training$A, H.AW, H.2W, H.1W, H.0W))
+
+```
+
+
+```{r}
+# Aaand I think we can delete the above. WOOF. #
+install.packages("ltmle")
+library(ltmle)
+ltmle.SL=ltmle(data=training, Anodes='A', Ynodes='infection_rate', abar=list(2,1,0),  SL.library=SL.library) #put data as training because it might take forever
+
+summary(ltmle.SL)
+```
+
+```{r}
+# Exploring model performance under misspecification. #
+ltmle.SL=ltmle(data=training, Anodes='A', Ynodes='infection_rate', abar=list(2,1,0), Qform=c(infection_rate="Q.kplus1 ~ A+population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associat+populationsq+population_densitysq"), gform="A~population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associat+populationsq+population_densitysq", SL.library=SL.library) #put data as training because it might take forever
+```
+
+
+```{r}
+# Explore double robustness using misspecified regression #
+ltmle.DRb=ltmle(data=training, Anodes='A', Ynodes='infection_rate', abar=list(1,0), SL.library=SL.library, gform="A~U")
+
+summary(ltmle.DRb)
+```
 **Provide some formally assessment of the positivity assumption. Evaluate the distribution of your estimated propensity score gn(A= 1|Wi), i=1, ..., n, and corresponding non-stabilized weights (as well as of your stabilized weights if you use stabilized weights to fit an MSM). Consider evaluating sensitivity to different truncation levels for gn. Note that for TMLE, bounding or truncating gn away from 0 is recommended on the basis of both theory and finite sample performance; for IPTW it can help or hurt.  Report how for how many observations was gn(A|Wi) truncated.**
 
 **Present a detailed plan for statistical inference/variance estimation based on the non-parametric bootstrap, and implement it (understanding that time  may be  a limitation  depending on  your  SL  library). When bootstrapping an estimator that uses cross-validation to estimate nuisance parameters, be careful to ensure that all copies of a given independent unit are contained within the same fold. Plot your bootstrap distribution and comment as appropriate. For TMLE (and IPTW), you can also report a influence curve based variance estimate for comparison, if you wish.**
 
 ## Interpret results.
 **What is the statistical interpretation of your analyses? Discuss differences (or lack thereof) in the estimates provided by the different estimators. What is the causal interpretation of your results and how plausible is it?  What are key limitations of your analysis? How might these results (if at all) inform policy, understanding, and/or the design of future studies?**
+
+As with any inquiry, we have some limitations with our current analysis. First, our treatment variable is not as specific as we would like to be able to isolate the impact of mask enforcement at the county level. Because enforcement is state-level and classified as either none, some, or all, we do not know which counties or geographic areas of the state had mask enforcements and which did not. This is why we implemented clustered standard errors on the state-level - our treatment variable pertains to a state, and each of the counties are nested within the state. It is standard practice to cluster at the level of your treatment (i.e., observations at the county-level, but treatment is at the state level.) 
+
+We are also running this assuming as an MSM, which means that we are assuming a linear impact of treatment on the outcome. This may be an unsafe assumption: the impact of mask enforcement is likely not linear (i.e., it is likely not the case that the difference between some mask enforcement and no mask enforcement is the same as full mask enforcement and some mask enforcement).
