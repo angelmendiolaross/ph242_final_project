@@ -26,7 +26,8 @@ pacman::p_load(# Tidyverse packages including dplyr and ggplot2
                nnet, 
                ltmle, 
                MLmetrics, 
-               MASS)
+               MASS, 
+               sqldf)
 
 covid_df <- read_csv(here("data/county_level_covid19_dataset.csv"))
 
@@ -357,7 +358,7 @@ The statistical model $\mathcal{M}$ is the set of possible observed data distrib
 *Be  sure  to  include  a  basic  descriptive  table  of  your  data  that  provides information on the outcome, exposure, and covariate distributions.*
 ```{r, echo=F, results='asis'}
 # reducing just to main variables
-stats <- df[c(9:10,12:20,23)]
+stats <- df_short[c(9:10,12:20,23)]
 stargazer(as.data.frame(stats),
           title = "Descriptive Statistics",
           digits=2,
@@ -434,9 +435,33 @@ df=df%>%
 df %>% 
   count(A)
 
-## Taking a random subset of the dataset to make estimation easier to run. I'm keeping 5000 rows to keep it as small as possible, but we can then adjust this to whatever maximum works for implementing the code easily. 
-df_short <- df[sample(1:nrow(df), 5000, replace=FALSE),]
+# One last step to prepare for estimation. ##
+df=df%>%
+  mutate(A=as.numeric(as.factor(mask_requirement))-1, populationsq=population**2, population_densitysq=population_density**2, log_population=log(population), log_popdensity=log(population_density))
+df %>%
+  count(A)
 
+## Taking a random subset of the dataset to make estimation easier to run. I'm keeping 5000 rows to keep it as small as possible, but we can then adjust this to whatever maximum works for implementing the code easily.
+set.seed(52059)
+unique_county=sqldf("SELECT DISTINCT county_name, state, A FROM df")
+uc_0=unique_county %>%
+  filter(A==0)
+uc_1=unique_county %>%
+  filter(A==1)
+uc_2=unique_county %>%
+  filter(A==2)
+dim_uc0=dim(uc_0)[1]
+dim_uc1=dim(uc_1)[1]
+dim_uc2=dim(uc_2)[1]
+n0=.12*dim_uc0
+n1=.12*dim_uc1
+n2=.12*dim_uc2
+cu_0=uc_0[sample(1:nrow(uc_0), n0, replace=FALSE),]
+cu_1=uc_1[sample(1:nrow(uc_1), n1, replace=FALSE),]
+cu_2=uc_2[sample(1:nrow(uc_2), n2, replace=FALSE),]
+only_these=as.data.frame(rbind(cu_0, cu_1, cu_2))
+df_short=only_these%>%
+  left_join(df)
 write.csv(df_short, "df_short.csv")
 ```
 
@@ -449,9 +474,8 @@ $\mathbb{E}_{U,X} = \sum_{w} \mathbb{E}_0[\mathbb{E}(Y|A=a,W=w)P_0(W=w)$
 # Commenting out for now because this is having problems, and I haven't been able to figure out what the problem is here. #
 
 df_short <- read.csv(here("df_short.csv")) ## adding this just so I don't have to run all the code each time R breaks
-
 set.seed(52059)
-n_short = 5000 ## so that if we change this, it's easy to change here
+n_short = 4452 ## so that if we change this, it's easy to change here
 
 Fold=c(rep(1, n_short), rep(2, n_short), rep(3, n_short), rep(4, n_short), rep(5, n_short), rep(6, n_short), rep(7, n_short), rep(8, n_short), rep(9, n_short), rep(10, n_short))
 ObsData=data.frame(df_short, Fold)
@@ -1027,7 +1051,6 @@ summary(gAW.reg)
 treat_pred=predict(gAW.reg, type="probs")
 summary(treat_pred)
 ## We're bound to have very extreme weights in the IPTW given that we have minimums of zero and maximums of 1. 
-
 gAW=matrix(NA, nrow=n_short, ncol=3)
 gAW[df_short$A==0] = treat_pred[df_short$A==0, "0"]
 gAW[df_short$A==1] = treat_pred[df_short$A==1, "1"]
@@ -1042,48 +1065,43 @@ summary(wt)
 
 ## Point estimate: weighted empirical mean outcome for states with mask enforcement mandate minus the weighted empirical mean for states without mask enforcement mandate
 IPTW <- mean(wt * as.numeric(df_short$A==2) * df_short$infection_rate) - mean(wt*(df_short$A==0)*(df_short$infection_rate))
-IPTW
+IPTW ## -29.02%
 
-## The IPTW estimate of Ψ(P0) is -152.82%. We can interpret this statistical estimand as the marginal difference in the infection rate associated with mask enforcement, after controlling for measured confounders. If the identifiability assumptions (i.e. randomization and positivity) held, we could then interpret ψ0 in terms of the average treatment effect (a.k.a. the causal risk difference).
+## The IPTW estimate of Ψ(P0) is -29.022%. We can interpret this statistical estimand as the marginal difference in the infection rate associated with mask enforcement, after controlling for measured confounders. If the identifiability assumptions (i.e. randomization and positivity) held, we could then interpret ψ0 in terms of the average treatment effect (a.k.a. the causal risk difference).
 
 ## Truncate weights ARBITRARILY at 10 and 50 
-sum(wt>10) ## 315 observations
-wt.trunc_10 <- wt
-wt.trunc_10[wt.trunc>10] = 10
+sum(wt>5) ## 612 observations
+wt.trunc_5 <- wt
+wt.trunc_5[wt.trunc_10>5] = 5
 
-sum(wt>50) ## 102 observations
+sum(wt>50) ## 144 observations
 wt.trunc_50 <- wt
-wt.trunc_50[wt.trunc>50] = 50
+wt.trunc_50[wt.trunc_50>50] = 50
 
-sum(wt>500) ## 21 observations
+sum(wt>500) ## 36 observations
 wt.trunc_500 <- wt
-wt.trunc_500[wt.trunc>500] = 500
-
-sum(wt>5000) ## 12 observations
-wt.trunc_5000 <- wt
-wt.trunc_5000[wt.trunc>5000] = 5000
+wt.trunc_500[wt.trunc_500>500] = 500
 
 ## Evaluating the IPTW estimand with the truncated weights
 
 ## Truncated at 10
-mean(wt.trunc_10*as.numeric(df_short$A==2)*df_short$infection_rate) - mean( wt.trunc_10*as.numeric(df_short$A==0)*df_short$infection_rate)
+mean(wt.trunc_5*as.numeric(df_short$A==2)*df_short$infection_rate) - mean(wt.trunc_5*as.numeric(df_short$A==0)*df_short$infection_rate)
+## 417.17%
 
 ## Truncated at 50 
 mean(wt.trunc_50*as.numeric(df_short$A==2)*df_short$infection_rate) - mean( wt.trunc_50*as.numeric(df_short$A==0)*df_short$infection_rate)
+## 164.24%
 
-## Truncateds at 500
+## Truncated at 500
 mean(wt.trunc_500*as.numeric(df_short$A==2)*df_short$infection_rate) - mean( wt.trunc_500*as.numeric(df_short$A==0)*df_short$infection_rate)
+## -29.02%
 
-## Truncated at 5000
-mean(wt.trunc_5000*as.numeric(df_short$A==2)*df_short$infection_rate) - mean( wt.trunc_5000*as.numeric(df_short$A==0)*df_short$infection_rate)
-
-## If we truncate the weights at 10, 50, 500 and 5000 we get the same ITPW estimate. 
+## Truncation at different levels yields very different results. The more observations we eliminate, the lower estimator we get. For instance, if we truncate at weight 5, which means we lose 612 observations, we get an estimator of 417.17%, whereas if we truncate at 500, which means we lose 36 observations, we get an estimator of -29.02%, same as the IPTW without truncation. 
 
 ## Stabilized IPTW estimator
 mean(wt*as.numeric(df_short$A==2)*df_short$infection_rate)/mean(wt*as.numeric(df_short$A==2)) - mean(wt*as.numeric(df_short$A==0)*df_short$infection_rate)/mean(wt*as.numeric(df_short$A==0))
 
-## For this sample of counties, the modified Horvitz-Thompson estimator yielded a very different estimate of 495.70%. 
-## Comment BS: I don't understand why this happens. It doesn't make sense, does it? 
+## For this sample of counties, the modified Horvitz-Thompson estimator yielded an estimate of 624.89%, closest to truncationa at a weight of 500. 
 ```
 
 **Present a detailed plan for statistical inference/variance estimation based on the non-parametric bootstrap, and implement it (understanding that time  may be a limitation  depending on  your  SL  library). When bootstrapping an estimator that uses cross-validation to estimate nuisance parameters, be careful to ensure that all copies of a given independent unit are contained within the same fold. Plot your bootstrap distribution and comment as appropriate. For TMLE (and IPTW), you can also report a influence curve based variance estimate for comparison, if you wish.**
@@ -1091,54 +1109,59 @@ mean(wt*as.numeric(df_short$A==2)*df_short$infection_rate)/mean(wt*as.numeric(df
 ## 4 The non-parametric bootstrap for variance estimation
 
 ```{r}
+## filtering data for non missing values 
+df_short_no_na <- df_short %>% 
+  filter(!is.na(infection_rate), !is.na(population), !is.na(population_density), !is.na(african_american), !is.na(asian_american), !is.na(hispanic), !is.na(median_hh_income), !is.na(pct_college_associate), !is.na(pct_unemployed), !is.na(log_population), !is.na(log_popdensity), !is.na(A), !is.na(log_popdensity)) %>%
+  dplyr::select(infection_rate, population, population_density, african_american, asian_american, hispanic, median_hh_income, pct_college_associate, pct_unemployed, log_popdensity, log_population, A)
+
 # SL.library=c("SL.glm", "SL.step", "SL.glm.interaction")
 SL.library=c("SL.glm") ## specifying a smaller library to try this out
 
-## transforming outcome to binary
-summary(df_short$infection_rate)
+## transforming outcome to binary so that we can get the non-parametric bootstrap to run 
+summary(df_short_no_na$infection_rate)
 ## we'll be cutting the variable in half at the median, 163.28
 
-df_short$infection_rate_bin <- cut(df_short$infection_rate, br=c(162,28, 9512.730),labels = c("1", "2"))
+df_short_no_na$infection_rate_bin <- cut(df_short_no_na$infection_rate, br=c(162.28, 698.9, 7590.7),labels = c("1", "2"))
 
-df_short <- df_short %>% mutate(
+df_short_no_na <- df_short_no_na %>% filter(!is.na(infection_rate_bin))
+
+df_short_no_na <- df_short_no_na %>% mutate(
   infection_rate_bin = case_when(
     infection_rate_bin == "1" ~ 0, 
     infection_rate_bin == "2" ~ 1,
     TRUE ~ NA_real_,
 ))
 
-# df_short$infection_rate_bin <- as.factor(df_short$infection_rate_bin)
-
 # number of bootstrap samples, starting with only 5, changing later to 500
 B=5
-
-# number of obs
-n = n_short
-
-# making an id variable
-df_short$id <- 1:n
 
 # data frame for estimates based on the boot strap sample
 estimates <- data.frame(matrix(NA, nrow=B, ncol=3))
 
+# number of obs
+n = 2203
+
+# making an id variable
+df_short_no_na$id <- 1:n
+
 # Function to handcode TMLE with Super Learner
-run.tmle <- function(df_short, SL.library, id=NULL){
+run.tmle <- function(df_short_no_na, SL.library, id=NULL){
   
   # Estimate the conditional mean outcome Qbar(A,W)
   # dataframe X with baseline covariates and exposure
-  X <- subset(df_short, select=c(A, population, population_density, african_american, asian_american, hispanic,median_hh_income, pct_unemployed, pct_college_associate, log_population, log_popdensity))
+  X <- subset(df_short_no_na, select=c(A, population, population_density, african_american, asian_american, hispanic,median_hh_income, pct_unemployed, pct_college_associate, log_population, log_popdensity))
   
-  # set the A=1 in X1 and the A=0 in X0
-  X1 <- X0 <-X
-  X1$A <- 1 # under exposure
+  # set the A=2 in X2 and the A=0 in X0
+  X2 <- X0 <-X
+  X2$A <- 2 # under exposure
   X0$A <- 0 # under control
   
   # call Super Learner for estimation of QbarAW
-  QbarSL <- SuperLearner(Y=df_short$infection_rate_bin, X=X, SL.library=SL.library, family="binomial", id=NULL)
+  QbarSL <- SuperLearner(Y=df_short_no_na$infection_rate_bin, X=X, SL.library=SL.library, family="binomial", id=id)
   QbarSL
   
   # initial estimates of the outcome, given the observed exposure & covariates
-  QbarAW <- predict(QbarSL, newdata=df_short)$pred
+  QbarAW <- predict(QbarSL, newdata=df_short_no_na)$pred
   # estimates of the outcome, given A=2 and covariates
   Qbar2W <- predict(QbarSL, newdata=X2)$pred
   # estimates of the outcome, given A=0 and covariates
@@ -1149,7 +1172,7 @@ run.tmle <- function(df_short, SL.library, id=NULL){
   
   # Estimate the exposure mechanism g(A|W)
   # call Super Learner for the exposure mechanism
-  gHatSL <- SuperLearner(Y=df_short$A, X=X, SL.library=SL.library, family="gaussian", id=NULL)
+  gHatSL <- SuperLearner(Y=df_short_no_na$A, X=X, SL.library=SL.library, family="gaussian", id=id)
   # generate predicted prob being exposed, given baseline covariates
   gHat2W <- gHatSL$SL.predict
   # predicted prob of not being exposed, given baseline covariates
@@ -1157,25 +1180,25 @@ run.tmle <- function(df_short, SL.library, id=NULL){
   
   # # predicted prob of observed exposure, given baseline cov
   gHatAW <- rep(NA, n)
-  gHatAW[df_short$A==2]<- gHat2W[df_short$A==2]
-  gHatAW[df_short$A==0]<- gHat0W[df_short$A==0]
+  gHatAW[df_short_no_na$A==2]<- gHat2W[df_short_no_na$A==2]
+  gHatAW[df_short_no_na$A==0]<- gHat0W[df_short_no_na$A==0]
 
   #-------------------------------------------------
   # Clever covariate H(A,W) for each subject
   #-------------------------------------------------
-  H.AW <- as.numeric(df_short$A==2)/gHat2W - as.numeric(df_short$A==0)/gHat0W
+  H.AW <- as.numeric(df_short_no_na$A==2)/gHat2W - as.numeric(df_short_no_na$A==0)/gHat0W
 
   # also want to evaluate the clever covariates at A=1 and A=0 for all subjects
   H.2W <- 1/gHat2W
   H.0W <- -1/gHat0W
   
   #IPTW estimator of the G-computation formula:
-  PsiHat.IPTW <- mean(H.AW*df_short$infection_rate)
+  PsiHat.IPTW <- mean(H.AW*df_short_no_na$infection_rate)
   
   #------------------------------------------
   # Update the initial estimator of Qbar_0(A,W)
   #------------------------------------------
-  logitUpdate<- glm(df_short$infection_rate_bin ~ -1 + offset(qlogis(QbarAW)) + H.AW, family='gaussian')
+  logitUpdate<- glm(df_short_no_na$infection_rate_bin ~ -1 + offset(qlogis(QbarAW)) + H.AW, family='binomial')
   epsilon <- logitUpdate$coef
   QbarAW.star <- plogis(qlogis(QbarAW)+ epsilon*H.AW)
   Qbar2W.star <- plogis(qlogis(Qbar2W)+ epsilon*H.2W)
@@ -1195,41 +1218,36 @@ run.tmle <- function(df_short, SL.library, id=NULL){
   list(estimates=estimates, Qbar.star=Qbar.star, H.AW=H.AW)
 }
 
+estimates
+
+## The TMLE estimate of Ψ(P0) is 12%. After controlling for baseline covariates, the marginal difference in the probability of high infection rate based on some mask enforcement versus no mask enforcement is negative. 
+
 # for loop from b=1 to total number of bootstrap samples
 for(b in 1:B){
   
   # sample the indices 1 to n with replacement
   bootIndices <- sample(1:n, replace=F) ## do we need to put without replacement if we want them to be independent across folds? 
-  bootData <- df_short[bootIndices,]
+  bootData <- df_short_no_na[bootIndices,]
   
   # calling the above function
-  estimates[b,]<- run.tmle(df_short=bootData, SL.library=SL.library, id=bootData$id)$estimates
+  estimates[b,]<- run.tmle(df_short_no_na=bootData, SL.library=SL.library, id=bootData$id)$estimates
   
   # keep track of the iterations completed
   print(b)
 }
 
-colnames(estimates) <- c("SimpSubs", "IPTW", "TMLE")
-
 #---------------------------------
 # Explore the bootstrapped point estimates
 #---------------------------------
-summary(estimates)
-
 par(mfrow=c(3,1))
-hist(estimates[,1], main="Histogram of point estimates from the Simple Substitution estimator over B bootstrapped samples", xlab="Point Estimates")
-hist(estimates[,2], main="Histogram of point estimates from IPTW estimator over B bootstrapped samples", xlab="Point Estimates")
-hist(estimates[,3], main="Histogram of point estimates from TMLE over B bootstrapped samples", xlab="Point Estimates")
-
-## Influence curve
-IC <- H.AW*(ObsData$Y - QbarAW.star) + Qbar1W.star - Qbar0W.star - PsiHat.TMLE
-
-
+hist(estimates[,1], main="Histogram of point estimates from \nthe Simple Substitution estimator \nover B bootstrapped samples", xlab="Point Estimates")
+hist(estimates[,2], main="Histogram of point estimates \nfrom IPTW estimator over \nB bootstrapped samples", xlab="Point Estimates")
+hist(estimates[,3], main="Histogram of point estimates from \nTMLE over B bootstrapped samples", xlab="Point Estimates")
 ```
 
 ## Interpret results.
 **What is the statistical interpretation of your analyses? Discuss differences (or lack thereof) in the estimates provided by the different estimators. What is the causal interpretation of your results and how plausible is it?  What are key limitations of your analysis? How might these results (if at all) inform policy, understanding, and/or the design of future studies?**
 
-As with any inquiry, we have some limitations with our current analysis. First, our treatment variable is not as specific as we would like to be able to isolate the impact of mask enforcement at the county level. Because enforcement is state-level and classified as either none, some, or all, we do not know which counties or geographic areas of the state had mask enforcements and which did not. This is why we implemented clustered standard errors on the state-level - our treatment variable pertains to a state, and each of the counties are nested within the state. It is standard practice to cluster at the level of your treatment (i.e., observations at the county-level, but treatment is at the state level.) 
+As with any inquiry, we have some limitations with our current analysis. First, our treatment variable is not as specific as we would like to be able to isolate the impact of mask enforcement at the county level. Because enforcement is at the state-level and classified as either "enforcement in all counties of the state", "enforcement in some counties of the state" and "enforcement in no counties of the state", we do not know specifically which counties or geographic areas of the state had mask enforcement and which did not. We started out implementing clustered standard errors at the state-level - since our treatment variable pertains to a state, and each of the counties are nested within the state. However, we ran into issues running the code with SuperLearner, a big sample size and clustered standard errors, and at the advice of the instructor, we're treating data as n.i.i.d. 
 
-We are also running this assuming as an MSM, which means that we are assuming a linear impact of treatment on the outcome. This may be an unsafe assumption: the impact of mask enforcement is likely not linear (i.e., it is likely not the case that the difference between some mask enforcement and no mask enforcement is the same as full mask enforcement and some mask enforcement).
+Also, after discussion with instructor, and given that out treatment indicator has three levels, we started analyzing this dataset under the assumption of a MSM, in which we are assuming a linear impact of treatment on the outcome (i.e. the difference between full mask enforcement and some mask enforcement is the same as the difference between some mask enforcement and no mask enforcement. This is likely to be an unsafe assumption, given that the impact of mask enforcement is likely not linear.
