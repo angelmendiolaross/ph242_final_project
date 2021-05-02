@@ -1,0 +1,1072 @@
+---
+title: "Introduction to Causal Inference - Final Project"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+### Clear global environment
+set.seed(52059)
+rm(list=ls())
+
+# Install packages 
+if (!require("pacman")) install.packages("pacman")
+
+pacman::p_load(# Tidyverse packages including dplyr and ggplot2 
+               tidyverse,
+               ggthemes,
+               tinytex, #latex
+               magrittr, #%<>% operator
+               here, 
+               stargazer, 
+               corrplot,
+               ggdag, 
+               SuperLearner,
+               polspline, 
+               nnet, 
+               ltmle, 
+               MLmetrics, 
+               MASS, 
+               sqldf)
+
+covid_df <- read_csv(here("data/county_level_covid19_dataset.csv"))
+
+## Selecting only the variables we'll be using for analysis 
+covid_df <- covid_df %>% dplyr::select(- `Predicted December Deaths`, - `Predicted December Cases`,        -`Predicted December Infection Rate (per 100,000)`, -`Predicted December Mortality Rate (per 100,000)`, -`Cumulative Mortality Rate (per 100,000)`, -`Cumulative Infection Rate (per 100,000)`)
+
+covid_df <- covid_df %>% rename(
+  mortality_jan = `January Mortality Rate (per 100,000)`,
+  mortality_feb = `February Mortality Rate (per 100,000)`, 
+  mortality_mar = `March Mortality Rate (per 100,000)`, 
+  mortality_apr = `April Mortality Rate (per 100,000)`, 
+  mortality_may = `May Mortality Rate (per 100,000)`, 
+  mortality_jun = `June Mortality Rate (per 100,000)`, 
+  mortality_jul = `July Mortality Rate (per 100,000)`, 
+  mortality_aug = `August Mortality Rate (per 100,000)`, 
+  mortality_sep = `September Mortality Rate (per 100,000)`, 
+  mortality_oct = `October Mortality Rate (per 100,000)`, 
+  mortality_nov = `November Mortality Rate (per 100,000)`, 
+  mortality_dec = `December Mortality Rate (per 100,000)`, 
+  infection_jan = `January Infection Rate (per 100,000)`, 
+  infection_feb = `February Infection Rate (per 100,000)`, 
+  infection_mar = `March Infection Rate (per 100,000)`, 
+  infection_apr = `April Infection Rate (per 100,000)`, 
+  infection_may = `May Infection Rate (per 100,000)`, 
+  infection_jun = `June Infection Rate (per 100,000)`, 
+  infection_jul = `July Infection Rate (per 100,000)`, 
+  infection_aug = `August Infection Rate (per 100,000)`, 
+  infection_sep = `September Infection Rate (per 100,000)`, 
+  infection_oct = `October Infection Rate (per 100,000)`, 
+  infection_nov = `November Infection Rate (per 100,000)`, 
+  infection_dec = `December Infection Rate (per 100,000)`, 
+  county_name = `County Name`, 
+  state = State, 
+  population = Population, 
+  pct_unemployed = `% Unemployed`, 
+  median_hh_income = `Median Household Income`, 
+  population_density = `Approximate Population Density`, 
+  african_american = `% African American`, 
+  hispanic = `% Hispanic`,
+  asian_american = `% Asian American`,
+  white = `% White American`,
+  native_alaskan = `% Native American and Alaska Native`,
+  hawaiian_pacific = `% Native Hawaiian and Other Pacific Islander`,
+  pct_college_associate = `Approx. % People with College or Associate's Degree per Year`, 
+  mask_requirement = `Statewide Mask Requirement`)
+```
+
+## Preprocessing Data
+
+Preprocessing included first transforming our dataset from wide to long.
+
+```{r, include=FALSE}
+# transforming our to a long dataset
+infect <- covid_df %>%
+  dplyr::select(countyFIPS, infection_jan, infection_feb, infection_mar, infection_apr, infection_may, 
+         infection_jun, infection_jul, infection_aug,infection_sep, infection_oct, infection_nov, infection_dec)
+
+infect_long <- gather(infect, month, infection_rate, c(infection_jan, infection_feb, infection_mar, infection_apr,
+                                                infection_may, infection_jun, infection_jul, infection_aug,
+                                                infection_sep, infection_oct, infection_nov, infection_dec
+                                                ), factor_key=TRUE)
+infect_long <- infect_long %>%
+  arrange(countyFIPS)
+
+# renaming months
+infect_long %<>%
+  separate(month, c(NA, "month"))
+
+# joining with geographic and demographic data
+wide_df <- covid_df[c(2:6,31:41)]
+df <- left_join(x = infect_long,
+                y = wide_df,
+                by = "countyFIPS")
+
+# rearranging our dataset
+df <- df[c(1,4,5,6,2,3,7:18)]
+
+# adding numerical month col
+df %<>%
+  mutate(mon = ifelse(month=="jan", 1, NA),
+         mon = ifelse(month=="feb", 2, mon),
+         mon = ifelse(month=="mar", 3, mon),
+         mon = ifelse(month=="apr", 4, mon),
+         mon = ifelse(month=="may", 5, mon),
+         mon = ifelse(month=="jun", 6, mon),
+         mon = ifelse(month=="jul", 7, mon),
+         mon = ifelse(month=="aug", 8, mon),
+         mon = ifelse(month=="sep", 9, mon),
+         mon = ifelse(month=="oct", 10, mon),
+         mon = ifelse(month=="nov", 11, mon),
+         mon = ifelse(month=="dec", 12, mon))
+
+```
+
+```{r, echo=TRUE}
+# looking at infection rates over time
+ggplot(df, aes(x=month, y=infection_rate, group = countyFIPS)) + 
+  geom_line() +
+  theme_fivethirtyeight() +
+  theme(axis.title = element_text()) +
+  ggtitle('Infection Rates by County and Month in 2020') +
+  xlab('Month') +
+  scale_x_discrete(limits=c("jan","feb","mar","apr","may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")) +
+  ylab('Infection Rate')
+```
+In order to assess the impact of statewide mask mandates over time, we need to refine the dataset such that our treatment indicator shows the *month* each state passed the mandate (rather than just whether or not they passed it). We created a supplemental dataset based on news reports which identifies (1) the month that each state passed statewide mandates or (2) the month that the first city/county passed a mask mandate for those states with mandates in some parts. 
+
+```{r, include=FALSE}
+# load dataset of when states passed their statewide mandates
+states <- read_csv("data/state_mandates_month.csv")
+states %<>%
+  mutate(treat_date = ifelse(date=="apr", 4, NA),
+         treat_date = ifelse(date=="may", 5, treat_date),
+         treat_date = ifelse(date=="jun", 6, treat_date),
+         treat_date = ifelse(date=="jul", 7, treat_date),
+         treat_date = ifelse(date=="aug", 8, treat_date),
+         treat_date = ifelse(date=="nov", 11, treat_date))
+states_month <- df %>%
+  group_by(state) %>%
+  dplyr::select(state, month)
+
+states_month <- left_join(states_month,states,by="state")
+# deleting duplicates
+states_month %<>%
+    distinct(state, month, .keep_all = TRUE)
+
+# adding numerical month col
+states_month %<>%
+  mutate(mon = ifelse(month=="jan", 1, NA),
+         mon = ifelse(month=="feb", 2, mon),
+         mon = ifelse(month=="mar", 3, mon),
+         mon = ifelse(month=="apr", 4, mon),
+         mon = ifelse(month=="may", 5, mon),
+         mon = ifelse(month=="jun", 6, mon),
+         mon = ifelse(month=="jul", 7, mon),
+         mon = ifelse(month=="aug", 8, mon),
+         mon = ifelse(month=="sep", 9, mon),
+         mon = ifelse(month=="oct", 10, mon),
+         mon = ifelse(month=="nov", 11, mon),
+         mon = ifelse(month=="dec", 12, mon))
+
+# creating treatment variable
+states_month %<>%
+  group_by(state) %>%
+  mutate(treatment = ifelse(mon>=treat_date,1,0)) 
+
+# assign SD as nontreated (the only state that never passed a mask mandate)
+states_month %<>%
+  mutate(treatment = ifelse(state=="SD",0,treatment))
+
+# cleaning up dataframe
+state_df <- states_month[c(1,2,6,8)]
+
+# join with main df
+df <- left_join(x = df,
+                  y = state_df,
+                  by = c("state", "month"))
+
+# load kansas county dataset
+kansas <- read_csv("data/kansas_counties.csv")
+
+# getting county fips that passed mandate
+kansas_nomask <- kansas %>% subset(is.na(mask_mandate)) %>%
+  dplyr::select(countyFIPS)
+  
+kansas_nomask <- dplyr::pull(kansas_nomask, countyFIPS)
+
+# updating kansas counties that did not pass mask mandates
+df %<>%
+  mutate(treatment = ifelse(countyFIPS %in% kansas_nomask, 0, treatment))
+
+# updating Tennessee counties that never had mask mandate
+tn_nomask <- c("47021", "47043", "47101", "47081")
+df %<>%
+  mutate(treatment = ifelse(countyFIPS %in% tn_nomask, 0, treatment))
+```
+
+Kansas is a unique case with mask mandate data available by county. On July 2, 2020, the governor of Kansas issued a state mandate, effective July 3, requiring masks or other face coverings in public spaces. As of August 11, 24 of Kansas’s 105 counties did not opt out of the state mandate. 81 counties opted out of the state mandate, as permitted by state law, and did not adopt their own mask mandate. These 81 counties are regarded as untreated in our dataset. Source: <https://www.cdc.gov/mmwr/volumes/69/wr/mm6947e2.htm>
+
+Four Tennessee counties that have never had a mask mandate: Cheatham, Dickson, Lewis and Hickman. These are regarded as untreated in the dataset. Source: <https://fox17.com/news/local/here-are-the-tennessee-counties-where-masks-are-mandated-right-now-thanksgiving-covid-19-travel-nashville-williamson-davidson-wilson-rutherford-sumner-montgomery-henry-robertson-wayne-warren>
+
+Finally, because unemployment changed so radically in 2020 and may be an important confounder, we also bring in monthly unemployment data from the BLS. <https://www.bls.gov/web/metro/laucntycur14.txt>
+
+```{r, include=FALSE}
+state_unemp <- read_csv("data/county_employment_rates.csv")
+# deleting preliminary data
+state_unemp %<>%
+  subset(Period!="Feb-21(p)")
+state_unemp_sm <- state_unemp[c(4,5,6,8,9)]
+
+state_unemp_sm %<>%
+  separate(Period, c("month", "year"))
+state_unemp_sm$month <- tolower(state_unemp_sm$month)
+
+state_unemp_sm %<>% rename(county_name = `Area Title`)
+# joining
+
+df <- left_join(x = df,
+                  y = state_unemp_sm,
+                  by = c("county_name", "month"))
+
+# deleting duplicates
+df %<>%
+    distinct(countyFIPS, month, .keep_all = TRUE)
+
+# rearranging and saving final df file
+df <- df[c(1:5,19,21,18,6,7:17,23,24,25,20)]
+
+# assessing missingness overall
+sum(is.na(df)) # 792
+
+# problem is SD treat_date is NA - fixing this
+df %<>%
+  mutate(treat_date=ifelse(state=="SD",0,treat_date))
+```
+
+```{r}
+## Checking correlations between individual variables within our W to make sure that there's not gonna be any multi-collinearity issues! ##
+just_ws=covid_df %>% ## Using covid_df because everything we need is here and not inflating size of sample by time unnecessarily - doesn't change correlation, but changes significance, if we want to look at that## 
+  dplyr::select(pct_unemployed, median_hh_income, population, population_density, african_american, hispanic, asian_american, white, native_alaskan, hawaiian_pacific, pct_college_associate)
+
+cor_justws=cor(just_ws)
+
+corrplot(cor_justws, type="upper", order="hclust", sig.level = 0.01, insig = "blank")
+```
+We seem to have a multi-collinearity issue: the percentage of the population identifying as White, Non-Hispanic/Latinx is highly negatively correlated with the percentage of the population identifying as Black. 
+
+## Specify the Scientific Question
+What is the effect of state mandates to wear a mask on Covid-19 infection rates in US counties during 2020? 
+This is a causal question - and not a statistical question - because we are not just interested in the observed association between mask enforcement by states and Covid-19 infection rate. We want to know what infection rates would have been if mask enforcement by states would have been generated differently, for example, by mandating all adults to wear a mask, or mandating no adults to wear a mask. The target population are US counties from January to December 2020. 
+
+## Specify a Causal Model
+
+**Endogenous variables:** 
+Endogenous variables are factors that inform the scientific question we're asking, and of which we have a certain level of knowledge. Here, we're including all observable factors that are present in our data, but we could potentially include some unobservables as well, which we will address later. 
+$infection_rate$ = Infection rates at the county-level (for each month from Jan to Dec 2020)
+$A$ = The exposure (state-wide mask mandate) has three possible levels: 
+$\mathcal{A} = \{0, 1, 2\}$. 
+These levels correspond to mask enforcement at the state-level (0 = No state-level mask enforcement, 1 = Mask enforcement only in some parts of the state, 2 = Yes, full, state-level mask enforcement).
+
+$W$ represents the following covariates:
+\begin{itemize}
+  \item Median income at the county level
+  \item % of Whites at the county level
+  \item % of Hispanic at the county level
+  \item % of African Americans at the county level
+  \item % of Asian Americans at the county level
+  \item % of residents who finished college or associate education at the county level
+  \item % unemployed (by month) at the county level
+  \item population of the county
+  \item population density of the county
+\end{itemize}
+
+Given our outcome of interest, treatment and potential confounders, we cannot make any independence assumptions or exclusion restrictions. The economic structure or policies developed at the county level can all be shared common causes of median income, race, educational attainment and employment. 
+
+**Exogenous variables: Unmeasured confounders:** 
+The exogenous variables include all the unmeasured factors that determine the values that the endogenous variables take. $U$ is a placeholder for all the shared causes between our endogenous variables that we do not know (it's not the random input to the system, just the __shared__ random input). 
+
+In this study, the exogenous nodes are $U=(U_{W1},U_{W2},U_{W3},U_{W4},U_{W5}, U_{W6}, U_{W7},U_A,U_Y) \sim P_U$:
+
+$U_Y$ refers to the unmeasured confounders of the set of covariates: 
+
+The unmeasured confounders related to the percentage of White, African American, Asian and Hispanic residents at the county level could be: economic structure, history of segregation, and political party in the majority. 
+
+The unmeasured confounders related to median income at the county level could be: economic structure, minumum wage, welfare policies. 
+
+The unmeasured confounders related to the percentage of residents who finished college or associate education at the county level could be: economic structure, welfare policies, quality of public school system, nurturing culture within the household.
+
+The unmeasured confounders related to the unemployment rate at the county level could be: economic structure, minimum wage, quality of unemployment services. 
+
+The unmeasured confounders related to the population and population density at the county level could be: political preference and/or partisanship of the county, presence of undocumented individuals. 
+
+The unmeasured confounders related to mask enforcement by the state could be: political pressure from different constituencies to either pass or abstain from passing a mask mandate.
+
+$U_Y$ refers to the unmeasured confounders related to mask enforcement by the state. These could be: genetic factors, medications, health care access, and travel behavior.
+
+**Structural Causal Model**
+$W = f_{W}(U_{W})$
+$A = f_A(W, U_A)$
+$infection_rate = f_Y(W,A,U_Y)$
+
+```{r}
+coords <- list(
+    x = c(A = 0, W = 5, U = 5, Y = 10),
+    y = c(A = 2, W = 10, U = 15, Y = 2))
+    
+dagify(Y ~ W + A + U,  
+       A ~ W + U, 
+       W ~ U, 
+       coords=coords) %>% 
+       ggdag() + 
+       theme_dag()
+```
+
+```{r}
+## Checking to make sure that the treatment variable (A) is county- or state-specific (seems to be state specific, so we'll be sure to implement clustering like Maya, Jean, and Shalika talked about) ##
+
+## This will also be a limitation. ##
+covid_df %>%
+  dplyr::select(county_name, state, mask_requirement) %>%
+  filter(state=="FL") 
+```
+
+## Translate your question into a formal target casual parameter defined using counterfactuals
+The intervention of interest is forcing each state to have a range of mask enforcement $a \in \mathcal{A}$. We are interested in exploring three levels in our intervention of interest: 
+0 = No mask enforcement at the state level, 
+1 = Mask enforcement in some parts of the state, 
+2 = Mask enforcement in the whole state.
+
+The counterfactuals of interest are ($\text{infection_rate}_a:a \in \mathcal{A}$), where A are the set of mask enforcement levels of interest. The counterfactual $\text{infection_rate}_a$ is the infection rate if, possibly contrary to fact, the state had a mask enforcement level $A=a$ from the January to December 2020 period.
+
+Counterfactuals of interest: 
+$\text{infection_rate}_a = {f}_Y (W, a, U_Y) (a \in \mathcal{A})$ = {0, 1, 2}
+where $\mathcal{A}$ refers to treatment levels of interest
+
+A marginal structural model provides a summary measure of how the expectation of the counterfactual outcome changes as a function of treatment. Given that our treatment has three potential levels of exposure, we think a marginal structural model is the most suitable way to represent this relationship. 
+
+$\mathbb{E}_{U,X}(Y_a) = m(a|\beta)$
+$\beta(P_{U,X|m})\equiv arg min_\beta \mathbb{E}_{U,X} [\sum_{a \in \mathcal{A}}(Y_a = m(a|\beta)^2)]$
+
+## Specify your observed data and its link to the casual model
+*Describe the data you are working with and its link to the casual model you have specified.*
+
+We assume the observed data were generated by sampling $n$ times from a data generating system contained in the structural causal model $\mathcal{M}\mathcal{F}$, resulting in $n$ i.i.d copies of $O_1$, $O_2$, $O_3$,...$O_n$ drawn from probability distribution $P_0$. This provides a link between the causal model $\mathcal{M}^\mathcal{F}$ and the statistical model $\mathcal{M}$.
+
+The statistical model $\mathcal{M}$ is the set of possible observed data distributions. We have not placed any restrictions on the statistical model, which is thereby non-parametric.
+
+*Be  sure  to  include  a  basic  descriptive  table  of  your  data  that  provides information on the outcome, exposure, and covariate distributions.*
+```{r, echo=F, results='asis'}
+# reducing just to main variables
+stats <- df[c(9:10,12:20,23)]
+stargazer(as.data.frame(stats),
+          title = "Descriptive Statistics",
+          digits=2,
+          header = FALSE,
+          covariate.labels = c("Infection Rate",
+                               "Population", 
+                               "Median Household Income", 
+                               "Population Density", 
+                               "Percent African American", 
+                               "Percent Latino", "Percent Asian American", 
+                               "Percent White", 
+                               "Percent Native American", 
+                               "Percent Pacific Islander", 
+                               "Percent College", 
+                               "Unemployment Rate"))
+```
+
+## Identify
+**Is your target casual parameter identified under your initial causal model?**
+Given that we're not making any assumptions on independence or exclusion restrictions, we won't be able to identify the causal parameter under our initial causal model because our covariates and the unmeasured confounders have open paths to $A$. 
+
+**If not, under what additional assumptions would it be identified?**
+We would need to make some convenience assumptions: 
+
+1. We would need to condition on all covariates (median income, race, education and unemployment). Doing this would block all paths from these variables to A and would not create any new paths. 
+
+However, assumption 1 is not enough because there's a remaining backdoor path to A still open via the $U_Y$ and $U_A$ that connects Y and A, and opens a backdoor back to A. So we add assumption 2:
+
+2. We would need to assume that there are no unmeasured shared causes between A and Y. For identifiability to hold, we must be sure that all of the observed association between A and Y is due to the causal effect we're interested in. Therefore, we need to additionally assume that Y does not affect A (i.e. that there's no reverse causality) for the purpose of this project, though in the real-world it'd be sensible to argue that an increase in the infection rate in a given state might affect the likelihood of the state deciding to implement a mask enforcement policy. Formally, we need to make assumptions about the independence of the background factors: $U_A \perp U_Y$ and (a) $U_A \perp U_W$ or (b) $U_Y \perp U_W$.
+
+We use $\mathcal{M}^\mathcal{F*}$ to denote the original SCM, augmented with additional assumptions needed for identifiability.
+
+To identify $\mathbb{E}_{U,X}(Y_a)$ with the G-computation formula, we also need the positivity assumption to hold:
+$$
+\min_{a \in A} \mathbb{P}_0(A=a | W=w) >0
+$$
+for all $w$ for which $\mathbb{P}_0(W=w)>0$. In this case, there must be a positive probability of passing a mask mandate and not passing a mask mandate within strata of baseline covariates.
+
+**How plausible  are  these  for  your  particular  problem?**
+We think these assumptions are too strong and might not hold in a real-life scenario. Based on empirical literature, we know that COVID-19 spread is related to the following (Roy & Ghosh, 2020}):
+
+\begin{itemize}
+  \item Population density
+  \item The amount of testing 
+  \item Airport traffic
+  \item Proportion of the population in a higher age groups (40 and above, and most especially 60+).
+\end{itemize}
+
+(Hyperlink latex thing was acting feisty, so just pasting the link here: https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0241165#:~:text=Population%20density%2C%20testing%20numbers%20and,population%20density%20and%20airport%20traffic.)
+
+***Specifically, we do not have data on the latter three*** and the amount of testing as well as the proportion of the population in a higher age group are likely to be contributing factors not only to infection rates, but also whether a state enforces mask-wearing. These data are certainly available from other sources, but we did not have time to acquire and merge the various data sources needed to accomplish this; however, this would certainly help us be more confident in making our necessary assumptions for model identification.
+
+Given that most of our covariates are continuous, we will also likely run into practical positivity violations, especially considering that only one state (with 66 counties) did not pass a mask mandate in at least some parts of the state in 2020.
+
+**Are there additional data/changes to your study design that would improve their plausibility?**
+As detailed above, there are certainly additional data sources (e.g., CPS, as well as other COVID-related data sets) that we could incorporate to improve the plausibility of our assumptions! 
+
+## Commit to a Statistical Model and Estimand (Target parameter of the observed data distribution).
+The SCM, which is a model on $P_{U,X}$ implies a model $\mathcal{M}$ on $P_0$. This is our statistical model. A statistical model is a set of allowed distributions for the observed data. 
+
+In this case, given the data we have and the convenience assumptions made, we will be working with a semi-parametric model (?). **I'm not too sure about how to think about this**
+
+The target parameter of the observed data distribution (the __estimand__) given our convenience assumptions, would be the following: 
+$[\mathbb{E}(Y|A=1,W=w) - \mathbb{E}(Y|A=0,W=w)]$
+
+## Estimate.
+**Apply each of the three estimators we have learned in class (simple or non-targeted substitution estimator-a.k.a G-computation estimator), Inverse probability of treatment weighted estimator, and TMLE) to estimate your target parameter. Use of the tmle, ltmle, or other Rpackages is acceptable. Also report unadjusted results for comparison.**
+
+```{r}
+# One last step to prepare for estimation. ##
+df=df%>%
+  mutate(A=as.numeric(as.factor(mask_requirement))-1, populationsq=population**2, population_densitysq=population_density**2, log_population=log(population), log_popdensity=log(population_density))
+
+df %>% 
+  count(A)
+
+## Taking a random subset of the dataset to make estimation easier to run. I'm keeping 5000 rows to keep it as small as possible, but we can then adjust this to whatever maximum works for implementing the code easily. 
+library(sqldf)
+unique_county=sqldf("SELECT DISTINCT county_name, state, A FROM df")
+uc_0=unique_county %>%
+  filter(A==0) 
+uc_1=unique_county %>%
+  filter(A==1)
+uc_2=unique_county %>%
+  filter(A==2)
+
+dim_uc0=dim(uc_0)[1]
+dim_uc1=dim(uc_1)[1]
+dim_uc2=dim(uc_2)[1]
+n0=.12*dim_uc0
+n1=.12*dim_uc1
+n2=.12*dim_uc2
+
+cu_0=uc_0[sample(1:nrow(uc_0), n0, replace=FALSE),]
+cu_1=uc_1[sample(1:nrow(uc_1), n1, replace=FALSE),]
+cu_2=uc_2[sample(1:nrow(uc_2), n2, replace=FALSE),]
+
+only_these=as.data.frame(rbind(cu_0, cu_1, cu_2))
+
+df_short=only_these%>%
+  left_join(df)
+
+df_shortbinary=df_short%>%
+  mutate(A_rev=ifelse(A==0, 1, A))
+
+df_shortbinary=subset(df_shortbinary, select = -c(A) )
+
+df_shortbinary=df_shortbinary%>%
+  mutate(A=A_rev-1, Y=infection_rate)
+
+df_shortbinary$infection_rate_bin=ifelse(df_shortbinary$infection_rate < median(df_shortbinary$infection_rate, na.rm = TRUE), 0, 1)
+
+write.csv(df_shortbinary, "df_shortbinary.csv")
+```
+
+## G-computation estimator
+
+$\mathbb{E}_{U,X} = \sum_{w} \mathbb{E}_0[\mathbb{E}(Y|A=a,W=w)P_0(W=w)$ 
+
+```{r}
+# G-Comp with SuperLearner #
+# Commenting out for now because this is having problems, and I haven't been able to figure out what the problem is here. #
+
+df_shortbinary <- read.csv(here("df_shortbinary.csv")) ## adding this just so I don't have to run all the code each time R breaks
+
+n_short = 4452 ## so that if we change this, it's easy to change here
+
+Fold=c(rep(1, n_short), rep(2, n_short), rep(3, n_short), rep(4, n_short), rep(5, n_short), rep(6, n_short), rep(7, n_short), rep(8, n_short), rep(9, n_short), rep(10, n_short))
+df_shortbinary=data.frame(df_shortbinary, Fold)
+head(df_shortbinary)
+
+CV.risk_L2=matrix(NA, nrow=10, ncol=4)
+CV.risk_MSE=matrix(NA, nrow=10, ncol=4)
+
+# Discrete Super Learner for loop - each estimator on training set #
+for (V in 1:10) {
+  ## creating validation and training set
+  valid=df_shortbinary[Fold==V,]
+  train=df_shortbinary[Fold!=V,]
+  nrow(valid)
+ 
+  ## using glm to fit each algorithm on the training set
+  EstA=glm(infection_rate_bin~population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+A, data=train, family='binomial')
+ 
+  EstB=glm(infection_rate_bin~population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+A, data=train, family='binomial')
+  
+  EstC=glm(infection_rate_bin~population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq+A, data=train, family='binomial')
+ 
+  EstD=glm(infection_rate_bin~population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq+A, data=train, family='binomial')
+  
+  ## For each algorithm, predicting the probability of Y for each observation in the validation set
+  PredA=predict(EstA, newdata=valid, type='response')
+  PredB=predict(EstB, newdata=valid, type='response')
+  PredC=predict(EstC, newdata=valid, type='response')
+  PredD=predict(EstD, newdata=valid, type='response')
+  
+  ## estimating the cross-validated risk estimate for each algorithm based on the L2 loss function.
+  CV.risk_L2[V,]=c(mean((valid$infection_rate-PredA)^2), mean((valid$infection_rate-PredB)^2), mean((valid$infection_rate-PredC)^2), mean((valid$infection_rate-PredD)^2))
+
+  ## estimating the cross-validated risk estimate for each algorithm based on the MSE loss function
+  CV.risk_MSE[V,]=c(MSE(PredA, valid$infection_rate), MSE(PredB, valid$infection_rate), MSE(PredC, valid$infection_rate), MSE(PredD, valid$infection_rate))
+}
+
+colMeans(CV.risk_L2)
+colMeans(CV.risk_MSE)
+```
+```{r}
+## Estimate of interest ##
+
+esta_out=summary(EstA)$coefficients[,1]["A"]
+estb_out=summary(EstB)$coefficients[,1]["A"]
+estc_out=summary(EstC)$coefficients[,1]["A"]
+estd_out=summary(EstD)$coefficients[,1]["A"]
+
+Gcomp_SL_adjres=c(esta_out, estb_out, estc_out, estd_out)
+Gcomp_SL_adjres
+```
+
+```{r}
+# G-Comp with SuperLearner - UNADJUSTED RESULTS #
+Fold=c(rep(1, n_short), rep(2, n_short), rep(3, n_short), rep(4, n_short), rep(5, n_short), rep(6, n_short), rep(7, n_short), rep(8, n_short), rep(9, n_short), rep(10, n_short))
+df_shortbinary=data.frame(df_shortbinary, Fold)
+head(df_shortbinary)
+
+CV.risk_L2_unadj=matrix(NA, nrow=10, ncol=1)
+CV.risk_MSE_unadj=matrix(NA, nrow=10, ncol=1)
+
+# Discrete Super Learner for loop - each estimator on training set #
+for (V in 1:10) {
+  ## creating validation and training set
+  valid=df_shortbinary[Fold==V,]
+  train=df_shortbinary[Fold!=V,]
+  nrow(valid)
+ 
+  ## using glm to fit each algorithm on the training set
+  Est_Unadj=glm(infection_rate_bin~A, data=train, family='binomial')
+ 
+  ## predicting the probability of Y for each observation in the validation set
+  Pred_Unadj=predict(Est_Unadj, newdata=valid, type='response')
+  
+  ## estimating the cross-validated risk estimate for each algorithm based on the L2 loss function.
+  CV.risk_L2_unadj[V,]=c(mean((valid$infection_rate-Pred_Unadj)^2))
+
+  ## estimating the cross-validated risk estimate for each algorithm based on the MSE loss function
+  CV.risk_MSE_unadj[V,]=c(MSE(Pred_Unadj, valid$infection_rate))
+}
+
+colMeans(CV.risk_L2_unadj)
+colMeans(CV.risk_MSE_unadj)
+```
+
+```{r}
+## Estimate of interest UNADJ ##
+
+estu_out=summary(Est_Unadj)$coefficients[,1]["A"]
+
+Gcomp_SL_unadjres=c(estu_out)
+Gcomp_SL_unadjres
+```
+
+
+## Inverse probability of treatment weighted estimator
+
+```{r}
+# Estimator T1  - White Included#
+iptw_treatreg1=glm(A ~ population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate, family="binomial", data=df_shortbinary)
+# iptw_treatreg=multinom(A ~ population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate, data=df_shortbinary, cluster=state)#
+
+treat_pred1=predict(iptw_treatreg1, type="probs")
+gAW1=matrix(NA, nrow=n_short, ncol=3)
+
+gAW1[df_shortbinary$A==0] = treat_pred1[df_shortbinary$A==0, "0"]
+gAW1[df_shortbinary$A==1] = treat_pred1[df_shortbinary$A==1, "1"]
+summary(gAW1)
+
+# Estimator T2  - African_American Included#
+iptw_treatreg2=glm(A ~ population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate, data=df_shortbinary, family="binomial")
+# iptw_treatreg=multinom(A ~ population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate, data=df_shortbinary, cluster=state)#
+
+treat_pred2=predict(iptw_treatreg2, type="probs")
+gAW2=matrix(NA, nrow=n_short, ncol=3)
+
+gAW2[df_shortbinary$A==0] = treat_pred2[df_shortbinary$A==0, "0"]
+gAW2[df_shortbinary$A==1] = treat_pred2[df_shortbinary$A==1, "1"]
+summary(gAW2)
+
+# Estimator T3  - White Included - Pop/Pop Density sq#
+iptw_treatreg3=glm(A ~ population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq, data=df_shortbinary, family="binomial")
+# iptw_treatreg=multinom(A ~ population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq, data=df_shortbinary, cluster=state)#
+
+treat_pred3=predict(iptw_treatreg3, type="probs")
+gAW3=matrix(NA, nrow=n_short, ncol=3)
+
+gAW3[df_shortbinary$A==0] = treat_pred3[df_shortbinary$A==0, "0"]
+gAW3[df_shortbinary$A==1] = treat_pred3[df_shortbinary$A==1, "1"]
+summary(gAW3)
+
+# Estimator T4  - African_American Included - pop/pop density sq#
+iptw_treatreg4=glm(A ~ population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq, data=df_shortbinary, family="binomial")
+# iptw_treatreg=multinom(A ~ population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq, data=df_shortbinary, cluster=state)#
+
+treat_pred4=predict(iptw_treatreg4, type="probs")
+gAW4=matrix(NA, nrow=n_short, ncol=3)
+
+gAW4[df_shortbinary$A==0] = treat_pred4[df_shortbinary$A==0, "0"]
+gAW4[df_shortbinary$A==1] = treat_pred4[df_shortbinary$A==1, "1"]
+summary(gAW4)
+
+```
+
+Ranges from zero (ish) to one, so that's good! Seems skewed towards higher values a bit though, too. 
+
+```{r}
+wt1=1/gAW1
+wt2=1/gAW2
+wt3=1/gAW3
+wt4=1/gAW4
+
+summary(wt1)
+summary(wt2)
+summary(wt3)
+summary(wt4)
+```
+
+
+```{r}
+
+## 1 vs 0 ##
+IPTW1=mean(wt1*as.numeric(df_shortbinary$A==1)*df_shortbinary$infection_rate)-mean(wt1*as.numeric(df_shortbinary$A==0)*df_shortbinary$infection_rate)
+
+HT1=(mean(wt1*as.numeric(df_shortbinary$A==1)*df_shortbinary$infection_rate)/mean(wt1*as.numeric(df_shortbinary$A==1)))-(mean(wt1*as.numeric(df_shortbinary$A==0)*df_shortbinary$infection_rate)/mean(wt1*as.numeric(df_shortbinary$A==0)))
+
+IPTW2=mean(wt2*as.numeric(df_shortbinary$A==1)*df_shortbinary$infection_rate)-mean(wt2*as.numeric(df_shortbinary$A==0)*df_shortbinary$infection_rate)
+
+HT2=(mean(wt2*as.numeric(df_shortbinary$A==1)*df_shortbinary$infection_rate)/mean(wt2*as.numeric(df_shortbinary$A==1)))-(mean(wt2*as.numeric(df_shortbinary$A==0)*df_shortbinary$infection_rate)/mean(wt2*as.numeric(df_shortbinary$A==0)))
+
+IPTW3=mean(wt3*as.numeric(df_shortbinary$A==1)*df_shortbinary$infection_rate)-mean(wt3*as.numeric(df_shortbinary$A==0)*df_shortbinary$infection_rate)
+
+HT3=(mean(wt3*as.numeric(df_shortbinary$A==1)*df_shortbinary$infection_rate)/mean(wt3*as.numeric(df_shortbinary$A==1)))-(mean(wt3*as.numeric(df_shortbinary$A==0)*df_shortbinary$infection_rate)/mean(wt3*as.numeric(df_shortbinary$A==0)))
+
+IPTW4=mean(wt4*as.numeric(df_shortbinary$A==1)*df_shortbinary$infection_rate)-mean(wt4*as.numeric(df_shortbinary$A==0)*df_shortbinary$infection_rate)
+
+HT4=(mean(wt4*as.numeric(df_shortbinary$A==1)*df_shortbinary$infection_rate)/mean(wt4*as.numeric(df_shortbinary$A==1)))-(mean(wt4*as.numeric(df_shortbinary$A==0)*df_shortbinary$infection_rate)/mean(wt4*as.numeric(df_shortbinary$A==0)))
+
+comp=as.data.frame(cbind(c("Est1","Est2", "Est3", "Est4"), rbind(cbind(IPTW1, HT1), cbind(IPTW2, HT2), cbind(IPTW3, HT3), cbind(IPTW4, HT4))))
+
+comp=comp%>%
+  rename(
+    IPTW = IPTW1,
+    HT = HT1,
+    Estimator = V1
+    )
+
+comp
+```
+
+HT is \textit{much} better than IPTW. These IPTW estimates are wild :) 
+
+```{r}
+## Stabilized - ADJUSTED ## 
+
+## IPTW stabilized 1 ##
+gA1=matrix(NA, nrow=37270)
+
+gA1[df_shortbinary$A==0]=mean(df_shortbinary$A==0)
+gA1[df_shortbinary$A==1]=mean(df_shortbinary$A==1)
+
+wt.MSM1=gA1/gAW1
+
+st.MSM1=glm(infection_rate_bin ~ A+population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate, data=df_shortbinary, family="binomial", weights=wt.MSM1)
+#st.MSM1=lm_robust(infection_rate ~ A, data=df_shortbinary, weights=wt.MSM, cluster=state) #
+summary(st.MSM1)
+
+## IPTW stabilized 2 ##
+gA2=matrix(NA, nrow=37270)
+
+gA2[df_shortbinary$A==0]=mean(df_shortbinary$A==0)
+gA2[df_shortbinary$A==1]=mean(df_shortbinary$A==1)
+
+wt.MSM2=gA2/gAW2
+
+st.MSM2=glm(infection_rate_bin ~ A+population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate, data=df_shortbinary, weights=wt.MSM2, family="binomial")
+#st.MSM2=lm_robust(infection_rate ~ A, data=df_shortbinary, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM2)
+
+## IPTW stabilized 3 ##
+gA3=matrix(NA, nrow=37270)
+
+gA3[df_shortbinary$A==0]=mean(df_shortbinary$A==0)
+gA3[df_shortbinary$A==1]=mean(df_shortbinary$A==1)
+
+wt.MSM3=gA3/gAW3
+
+st.MSM3=glm(infection_rate_bin ~ A+population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq, data=df_shortbinary, family="binomial", weights=wt.MSM3)
+#st.MSM3=lm_robust(infection_rate ~ A, data=df_shortbinary, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM3)
+
+## IPTW stabilized 4 ##
+gA4=matrix(NA, nrow=37270)
+
+gA4[df_shortbinary$A==0]=mean(df_shortbinary$A==0)
+gA4[df_shortbinary$A==1]=mean(df_shortbinary$A==1)
+
+wt.MSM4=gA4/gAW4
+
+st.MSM4=glm(infection_rate_bin ~ A+population+population_density+african_american+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate+populationsq+population_densitysq, data=df_shortbinary, family="binomial", weights=wt.MSM4)
+#st.MSM4=lm_robust(infection_rate ~ A, data=df_shortbinary, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM4)
+
+iptw_sw_matrix=matrix(NA, nrow=4, ncol=1)
+iptw_sw_matrix[1,]=st.MSM1$coefficients["A"]
+iptw_sw_matrix[2,]=st.MSM2$coefficients["A"]
+iptw_sw_matrix[3,]=st.MSM3$coefficients["A"]
+iptw_sw_matrix[4,]=st.MSM4$coefficients["A"]
+
+iptw_sw_matrix
+```
+
+```{r}
+## Stabilized - UNADJUSTED ## 
+
+## IPTW stabilized 1 ##
+gA1=matrix(NA, nrow=37270)
+
+gA1[df_shortbinary$A==0]=mean(df_shortbinary$A==0)
+gA1[df_shortbinary$A==1]=mean(df_shortbinary$A==1)
+
+wt.MSM1=gA1/gAW1
+
+st.MSM1=glm(infection_rate_bin ~ A, data=df_shortbinary, weights=wt.MSM1, family="binomial")
+#st.MSM1=lm_robust(infection_rate ~ A, data=df_shortbinary, weights=wt.MSM, cluster=state) #
+summary(st.MSM1)
+
+## IPTW stabilized 2 ##
+gA2=matrix(NA, nrow=37270)
+
+gA2[df_shortbinary$A==0]=mean(df_shortbinary$A==0)
+gA2[df_shortbinary$A==2]=mean(df_shortbinary$A==2)
+
+wt.MSM2=gA2/gAW2
+
+st.MSM2=glm(infection_rate_bin ~ A, data=df_shortbinary, weights=wt.MSM2)
+#st.MSM2=lm_robust(infection_rate ~ A, data=df_shortbinary, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM2)
+
+## IPTW stabilized 3 ##
+gA3=matrix(NA, nrow=37270)
+
+gA3[df_shortbinary$A==0]=mean(df_shortbinary$A==0)
+gA3[df_shortbinary$A==1]=mean(df_shortbinary$A==1)
+
+wt.MSM3=gA3/gAW3
+
+st.MSM3=glm(infection_rate_bin ~ A, data=df_shortbinary,family="binomial", weights=wt.MSM3)
+#st.MSM3=lm_robust(infection_rate ~ A, data=df_shortbinary, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM3)
+
+## IPTW stabilized 4 ##
+gA4=matrix(NA, nrow=37270)
+
+gA4[df_shortbinary$A==0]=mean(df_shortbinary$A==0)
+gA4[df_shortbinary$A==1]=mean(df_shortbinary$A==1)
+
+wt.MSM4=gA4/gAW4
+
+st.MSM4=glm(infection_rate_bin ~ A, data=df_shortbinary, weights=wt.MSM4, family="binomial")
+#st.MSM4=lm_robust(infection_rate ~ A, data=df_shortbinary, weights=wt.MSM, cluster=state) #
+
+summary(st.MSM4)
+
+iptw_sw_matrix=matrix(NA, nrow=4, ncol=1)
+iptw_sw_matrix[1,]=st.MSM1$coefficients[2]
+iptw_sw_matrix[2,]=st.MSM2$coefficients[2]
+iptw_sw_matrix[3,]=st.MSM3$coefficients[2]
+iptw_sw_matrix[4,]=st.MSM4$coefficients[2]
+
+iptw_sw_matrix
+```
+
+## TMLE 
+**Use Super Learner when implementing TMLE. For comparison, you may wish to use it when implementing your G-computation and IPTW estimators also. A simple library is fine (writing wrappers to include your own parametric regressions as candidates is great). Include an assessment of the performance (cross validated risk) of the algorithms in your library. It is helpful to include the simple mean as a benchmark.Also report an estimate of the cross-validated risk of the SL and interpret.**
+
+
+```{r}
+SL.library=c("SL.step", "SL.mean")
+# install.packages("ltmle")
+# adjusted 
+just_AYU=subset(df_shortbinary, select = c(A, infection_rate_bin) )
+
+ltmle.SL_estunadj=ltmle(just_AYU, Anodes='A', Ynodes='infection_rate_bin', abar=list(1,0), SL.library = SL.library) 
+summary(ltmle.SL_estunadj) #Okay, you broke me, ltmle! Thanks!#
+
+estc_subset=subset(df_shortbinary, select = c(A, infection_rate_bin, population, population_density, white, asian_american, hispanic, median_hh_income, pct_unemployed, pct_college_associate, populationsq, population_densitysq ) )
+
+ltmle.SL_estc=ltmle(estc_subset, Anodes='A', Ynodes='infection_rate_bin', abar=list(1,0), SL.library = SL.library)
+summary(ltmle.SL_estc) #Okay, you broke me, ltmle! Thanks!#
+
+## adj : ltmle.SL_estunadj=ltmle(df_shortbinary, Anodes='A', Ynodes='Y', abar=1, SL.library=SL.library, Qform=c(Y="~population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associat+populationsq+population_densitysq+A"), gform="A~population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associat+populationsq+population_densitysq") 
+##summary(ltmle.SL_estunadj) ##
+```
+
+
+**Provide some formally assessment of the positivity assumption. Evaluate the distribution of your estimated propensity score gn(A= 1|Wi), i=1, ..., n, and corresponding non-stabilized weights (as well as of your stabilized weights if you use stabilized weights to fit an MSM). Consider evaluating sensitivity to different truncation levels for gn. Note that for TMLE, bounding or truncating gn away from 0 is recommended on the basis of both theory and finite sample performance; for IPTW it can help or hurt. Report how for how many observations was gn(A|Wi) truncated.**
+
+We show above how some of the weights are extremely high for some states because of violations to the positivity assumption. To provide more context for this, we create a series of plots showing why the estimated propensity score is so extreme in some cases.
+
+First, we plot values of two covariates--population density and the share of Black residents--by treatment levels. While there is pretty good coverage between a statewide mandate and mandate in some parts, none of the counties that never passed a mask mandate have a percent of Black residents that exceeds 7 percent. In addition, the most densely populated counties are all in states with statewide mask mandates.
+```{r}
+ggplot(data = df_shortbinary, aes(x = population_density, y = african_american, color = as.factor(mask_requirement))) +
+  geom_point() + 
+  scale_x_log10() +
+  facet_grid( ~ mask_requirement) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  labs(y="Percent Black/African American", x = "Population Density (logged)") +
+  ggtitle("Mask Mandates (Treatment) and Baseline Covariates")
+```
+
+Similarly, when we plot total population and median household income, we see several strata with zero observations and therefore risk overfitting a non-parametric maximum likelihood estimator.
+```{r}
+ggplot(data = df_shortbinary, aes(x = population, y = median_hh_income, color = as.factor(mask_requirement))) +
+  geom_point() + 
+  scale_x_log10() +
+  facet_grid( ~ mask_requirement) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  labs(y="Median Household Income", x = "Population (logged)") +
+  ggtitle("Mask Mandates (Treatment) and Baseline Covariates")
+```
+
+```{r}
+## Estimating the treatment mechanism g(A|W) = P(A|W)
+gAW.reg=multinom(A ~ population+population_density+white+asian_american+hispanic+median_hh_income+pct_unemployed+pct_college_associate, data=df_short)
+summary(gAW.reg)
+
+## Predicted probabilities by treatment level
+treat_pred=predict(gAW.reg, type="probs")
+summary(treat_pred)
+## We're bound to have very extreme weights in the IPTW given that we have minimums of zero and maximums of 1. 
+
+gAW=matrix(NA, nrow=n_short, ncol=3)
+gAW[df_short$A==0] = treat_pred[df_short$A==0, "0"]
+gAW[df_short$A==1] = treat_pred[df_short$A==1, "1"]
+gAW[df_short$A==2] = treat_pred[df_short$A==2, "2"]
+summary(gAW)
+
+## Each observation gets an inverse weight inverse to their predicted probability
+wt <- 1/gAW
+
+# look at the distribution of weights
+summary(wt)
+
+## Point estimate: weighted empirical mean outcome for states with mask enforcement mandate minus the weighted empirical mean for states without mask enforcement mandate
+IPTW <- mean(wt * as.numeric(df_short$A==2) * df_short$infection_rate) - mean(wt*(df_short$A==0)*(df_short$infection_rate))
+IPTW
+
+## The IPTW estimate of Ψ(P0) is -152.82%. We can interpret this statistical estimand as the marginal difference in the infection rate associated with mask enforcement, after controlling for measured confounders. If the identifiability assumptions (i.e. randomization and positivity) held, we could then interpret ψ0 in terms of the average treatment effect (a.k.a. the causal risk difference).
+
+## Truncate weights ARBITRARILY at 10 and 50 
+sum(wt>10) ## 315 observations
+wt.trunc_10 <- wt
+wt.trunc_10[wt.trunc>10] = 10
+
+sum(wt>50) ## 102 observations
+wt.trunc_50 <- wt
+wt.trunc_50[wt.trunc>50] = 50
+
+sum(wt>500) ## 21 observations
+wt.trunc_500 <- wt
+wt.trunc_500[wt.trunc>500] = 500
+
+sum(wt>5000) ## 12 observations
+wt.trunc_5000 <- wt
+wt.trunc_5000[wt.trunc>5000] = 5000
+
+## Evaluating the IPTW estimand with the truncated weights
+
+## Truncated at 10
+mean(wt.trunc_10*as.numeric(df_short$A==2)*df_short$infection_rate) - mean( wt.trunc_10*as.numeric(df_short$A==0)*df_short$infection_rate)
+
+## Truncated at 50 
+mean(wt.trunc_50*as.numeric(df_short$A==2)*df_short$infection_rate) - mean( wt.trunc_50*as.numeric(df_short$A==0)*df_short$infection_rate)
+
+## Truncateds at 500
+mean(wt.trunc_500*as.numeric(df_short$A==2)*df_short$infection_rate) - mean( wt.trunc_500*as.numeric(df_short$A==0)*df_short$infection_rate)
+
+## Truncated at 5000
+mean(wt.trunc_5000*as.numeric(df_short$A==2)*df_short$infection_rate) - mean( wt.trunc_5000*as.numeric(df_short$A==0)*df_short$infection_rate)
+
+## If we truncate the weights at 10, 50, 500 and 5000 we get the same ITPW estimate. 
+
+## Stabilized IPTW estimator
+mean(wt*as.numeric(df_short$A==2)*df_short$infection_rate)/mean(wt*as.numeric(df_short$A==2)) - mean(wt*as.numeric(df_short$A==0)*df_short$infection_rate)/mean(wt*as.numeric(df_short$A==0))
+
+## For this sample of counties, the modified Horvitz-Thompson estimator yielded a very different estimate of 495.70%. 
+## Comment BS: I don't understand why this happens. It doesn't make sense, does it? 
+```
+
+**Present a detailed plan for statistical inference/variance estimation based on the non-parametric bootstrap, and implement it (understanding that time  may be a limitation  depending on  your  SL  library). When bootstrapping an estimator that uses cross-validation to estimate nuisance parameters, be careful to ensure that all copies of a given independent unit are contained within the same fold. Plot your bootstrap distribution and comment as appropriate. For TMLE (and IPTW), you can also report a influence curve based variance estimate for comparison, if you wish.**
+
+## 4 The non-parametric bootstrap for variance estimation
+
+```{r}
+# SL.library=c("SL.glm", "SL.step", "SL.glm.interaction")
+SL.library=c("SL.glm") ## specifying a smaller library to try this out
+
+## transforming outcome to binary
+summary(df_short$infection_rate)
+## we'll be cutting the variable in half at the median, 163.28
+
+df_short$infection_rate_bin <- cut(df_short$infection_rate, br=c(162,28, 9512.730),labels = c("1", "2"))
+
+df_short <- df_short %>% mutate(
+  infection_rate_bin = case_when(
+    infection_rate_bin == "1" ~ 0, 
+    infection_rate_bin == "2" ~ 1,
+    TRUE ~ NA_real_,
+))
+
+# df_short$infection_rate_bin <- as.factor(df_short$infection_rate_bin)
+
+# number of bootstrap samples, starting with only 5, changing later to 500
+B=5
+
+# number of obs
+n = n_short
+
+# making an id variable
+df_short$id <- 1:n
+
+# data frame for estimates based on the boot strap sample
+estimates <- data.frame(matrix(NA, nrow=B, ncol=3))
+
+# Function to handcode TMLE with Super Learner
+run.tmle <- function(df_short, SL.library, id=NULL){
+  
+  # Estimate the conditional mean outcome Qbar(A,W)
+  # dataframe X with baseline covariates and exposure
+  X <- subset(df_short, select=c(A, population, population_density, african_american, asian_american, hispanic,median_hh_income, pct_unemployed, pct_college_associate, log_population, log_popdensity))
+  
+  # set the A=1 in X1 and the A=0 in X0
+  X1 <- X0 <-X
+  X1$A <- 1 # under exposure
+  X0$A <- 0 # under control
+  
+  # call Super Learner for estimation of QbarAW
+  QbarSL <- SuperLearner(Y=df_short$infection_rate_bin, X=X, SL.library=SL.library, family="binomial", id=NULL)
+  QbarSL
+  
+  # initial estimates of the outcome, given the observed exposure & covariates
+  QbarAW <- predict(QbarSL, newdata=df_short)$pred
+  # estimates of the outcome, given A=2 and covariates
+  Qbar2W <- predict(QbarSL, newdata=X2)$pred
+  # estimates of the outcome, given A=0 and covariates
+  Qbar0W <- predict(QbarSL, newdata=X0)$pred
+  
+  # simple substitution estimator:
+  PsiHat.SS <- mean(Qbar2W - Qbar0W)
+  
+  # Estimate the exposure mechanism g(A|W)
+  # call Super Learner for the exposure mechanism
+  gHatSL <- SuperLearner(Y=df_short$A, X=X, SL.library=SL.library, family="binomial", id=NULL)
+  # generate predicted prob being exposed, given baseline covariates
+  gHat2W <- gHatSL$SL.predict
+  # predicted prob of not being exposed, given baseline covariates
+  gHat0W <- 1- gHat2W
+  
+  # # predicted prob of observed exposure, given baseline cov
+  gHatAW <- rep(NA, n)
+  gHatAW[df_short$A==2]<- gHat2W[df_short$A==2]
+  gHatAW[df_short$A==0]<- gHat0W[df_short$A==0]
+
+  #-------------------------------------------------
+  # Clever covariate H(A,W) for each subject
+  #-------------------------------------------------
+  H.AW <- as.numeric(df_short$A==2)/gHat2W - as.numeric(df_short$A==0)/gHat0W
+
+  # also want to evaluate the clever covariates at A=1 and A=0 for all subjects
+  H.2W <- 1/gHat2W
+  H.0W <- -1/gHat0W
+  
+  #IPTW estimator of the G-computation formula:
+  PsiHat.IPTW <- mean(H.AW*df_short$infection_rate)
+  
+  #------------------------------------------
+  # Update the initial estimator of Qbar_0(A,W)
+  #------------------------------------------
+  logitUpdate<- glm(df_short$infection_rate_bin ~ -1 + offset(qlogis(QbarAW)) + H.AW, family='binomial')
+  epsilon <- logitUpdate$coef
+  QbarAW.star <- plogis(qlogis(QbarAW)+ epsilon*H.AW)
+  Qbar2W.star <- plogis(qlogis(Qbar2W)+ epsilon*H.2W)
+  Qbar0W.star <- plogis(qlogis(Qbar0W)+ epsilon*H.0W)
+  
+  #------------------------------------------
+  # Estimate Psi(P_0)
+  #------------------------------------------
+  PsiHat.TMLE <- mean(Qbar2W.star - Qbar0W.star)
+  
+  #------------------------------------------
+  # Return point estimates, targeted estimates of Qbar_0(A,W), and the vector of clever covariates
+  #------------------------------------------
+  estimates <- data.frame(cbind(PsiHat.SS=PsiHat.SS, PsiHat.IPTW, PsiHat.TMLE))
+  Qbar.star <- data.frame(cbind(QbarAW.star, Qbar2W.star, Qbar0W.star))
+  names(Qbar.star)<- c('QbarAW.star', 'Qbar2W.star', 'Qbar0W.star')
+  list(estimates=estimates, Qbar.star=Qbar.star, H.AW=H.AW)
+}
+
+# for loop from b=1 to total number of bootstrap samples
+for(b in 1:B){
+  
+  # sample the indices 1 to n with replacement
+  bootIndices <- sample(1:n, replace=F) ## do we need to put without replacement if we want them to be independent across folds? 
+  bootData <- df_short[bootIndices,]
+  
+  # calling the above function
+  estimates[b,]<- run.tmle(df_short=bootData, SL.library=SL.library, id=bootData$id)$estimates
+  
+  # keep track of the iterations completed
+  print(b)
+}
+
+colnames(estimates) <- c("SimpSubs", "IPTW", "TMLE")
+
+#---------------------------------
+# Explore the bootstrapped point estimates
+#---------------------------------
+summary(estimates)
+
+par(mfrow=c(3,1))
+hist(estimates[,1], main="Histogram of point estimates from the Simple Substitution estimator over B bootstrapped samples", xlab="Point Estimates")
+hist(estimates[,2], main="Histogram of point estimates from IPTW estimator over B bootstrapped samples", xlab="Point Estimates")
+hist(estimates[,3], main="Histogram of point estimates from TMLE over B bootstrapped samples", xlab="Point Estimates")
+
+## Influence curve
+IC <- H.AW*(df_shortbinary$Y - QbarAW.star) + Qbar1W.star - Qbar0W.star - PsiHat.TMLE
+
+
+```
+
+## Interpret results.
+**What is the statistical interpretation of your analyses? Discuss differences (or lack thereof) in the estimates provided by the different estimators. What is the causal interpretation of your results and how plausible is it?  What are key limitations of your analysis? How might these results (if at all) inform policy, understanding, and/or the design of future studies?**
+
+As with any inquiry, we have some limitations with our current analysis. First, our treatment variable is not as specific as we would like to be able to isolate the impact of mask enforcement at the county level. Because enforcement is state-level and classified as either none, some, or all, we do not know which counties or geographic areas of the state had mask enforcements and which did not. This is why we implemented clustered standard errors on the state-level - our treatment variable pertains to a state, and each of the counties are nested within the state. It is standard practice to cluster at the level of your treatment (i.e., observations at the county-level, but treatment is at the state level.) 
+
+We are also running this assuming as an MSM, which means that we are assuming a linear impact of treatment on the outcome. This may be an unsafe assumption: the impact of mask enforcement is likely not linear (i.e., it is likely not the case that the difference between some mask enforcement and no mask enforcement is the same as full mask enforcement and some mask enforcement).
